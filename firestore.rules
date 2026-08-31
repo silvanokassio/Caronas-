@@ -1,0 +1,44 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Users Collection
+    match /users/{userId} {
+      allow read, write: if true;
+    }
+
+    // Communities Collection (Hierarquia de Comunidades e Grupos)
+    match /communities/{communityId} {
+      allow read, write: if true;
+    }
+
+    // Groups Collection
+    match /groups/{groupId} {
+      allow read, write: if true;
+    }
+
+    // Rides Collection & Tracking subcollection
+    match /rides/{rideId} {
+      allow read, write: if true;
+
+      match /tracking/{trackingId} {
+        allow read, write: if true;
+      }
+    }
+
+    // Ledger Transactions Collection
+    match /ledger_transactions/{txId} {
+      allow read, write: if true;
+    }
+
+    // Recurrent Routines Collection
+    match /routines/{routineId} {
+      allow read, write: if true;
+    }
+
+    // Push Notifications Collection
+    match /notifications/{notifId} {
+      allow read, write: if true;
+    }
+  }
+}

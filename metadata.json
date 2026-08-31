@@ -1,0 +1,6 @@
+{
+  "name": "Caronas - Conectando pessoas",
+  "description": "Plataforma multiplataforma (Cloud Run & Firebase) para gestão de caronas rotineiras com roteamento inteligente, tracking em tempo real, saldo gamificado e otimização por IA.",
+  "requestFramePermissions": ["geolocation"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

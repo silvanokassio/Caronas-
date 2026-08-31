@@ -1,0 +1,125 @@
+{
+  "entities": {
+    "users": {
+      "title": "users",
+      "description": "User profiles including role preference, vehicle, meeting point, and gamification balance",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "email": { "type": "string" },
+        "avatar": { "type": "string" },
+        "rolePreference": { "type": "string", "enum": ["driver", "passenger"] },
+        "institutionName": { "type": "string" },
+        "rating": { "type": "number" },
+        "saldo_caronas": { "type": "number" },
+        "totalRidesOffered": { "type": "number" },
+        "totalRidesTaken": { "type": "number" },
+        "agency": { "type": "string" },
+        "accountNumber": { "type": "string" },
+        "pixKey": { "type": "string" },
+        "ponto_encontro_default": { "type": "object" },
+        "vehicle": { "type": "object" },
+        "routine": { "type": "object" },
+        "groups": { "type": "array", "items": { "type": "string" } },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["name", "email", "rolePreference"]
+    },
+    "groups": {
+      "title": "groups",
+      "description": "Academic and corporate carpooling groups with manager governance and default travel parameters",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "category": { "type": "string", "enum": ["academic", "corporate", "community"] },
+        "domainRestricted": { "type": "string" },
+        "memberIds": { "type": "array", "items": { "type": "string" } },
+        "memberCount": { "type": "number" },
+        "description": { "type": "string" },
+        "icon": { "type": "string" },
+        "creatorId": { "type": "string" },
+        "creatorName": { "type": "string" },
+        "adminIds": { "type": "array", "items": { "type": "string" } },
+        "defaultDestination": { "type": "object" },
+        "defaultPrice": { "type": "number" },
+        "defaultDepartureTime": { "type": "string" },
+        "pendingJoinRequests": { "type": "array", "items": { "type": "object" } },
+        "pendingInvitations": { "type": "array", "items": { "type": "object" } },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["name", "category", "memberIds", "defaultDestination", "defaultPrice", "defaultDepartureTime"]
+    },
+    "rides": {
+      "title": "rides",
+      "description": "Ride offers and active carpools with real-time passenger acceptance",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "driverId": { "type": "string" },
+        "driverName": { "type": "string" },
+        "driverAvatar": { "type": "string" },
+        "origin": { "type": "object" },
+        "destination": { "type": "object" },
+        "departureTime": { "type": "string" },
+        "departureDate": { "type": "string" },
+        "price": { "type": "number" },
+        "totalSeats": { "type": "number" },
+        "occupiedSeats": { "type": "number" },
+        "status": { "type": "string", "enum": ["agendada", "em_andamento", "concluida", "cancelada"] },
+        "visibility": { "type": "string", "enum": ["public", "group"] },
+        "targetGroupId": { "type": "string" },
+        "targetGroupName": { "type": "string" },
+        "acceptedPassengers": { "type": "array", "items": { "type": "object" } },
+        "pendingRequests": { "type": "array", "items": { "type": "object" } },
+        "waypointsOrder": { "type": "array", "items": { "type": "object" } },
+        "distanceKm": { "type": "number" },
+        "estimatedDurationMin": { "type": "number" },
+        "fuelCostEstimated": { "type": "number" },
+        "estimatedCarbonSavingKg": { "type": "number" },
+        "startedAt": { "type": "string" },
+        "completedAt": { "type": "string" }
+      },
+      "required": ["driverId", "origin", "destination", "departureTime", "totalSeats", "status"]
+    },
+    "ledger_transactions": {
+      "title": "ledger_transactions",
+      "description": "Immutable ledger tracking rides given/taken and monetary values",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "rideId": { "type": "string" },
+        "amount": { "type": "number" },
+        "valueBRL": { "type": "number" },
+        "type": { "type": "string" },
+        "category": { "type": "string" },
+        "counterpartName": { "type": "string" },
+        "counterpartId": { "type": "string" },
+        "description": { "type": "string" },
+        "status": { "type": "string" },
+        "timestamp": { "type": "string" }
+      },
+      "required": ["userId", "amount", "type", "timestamp"]
+    },
+    "routines": {
+      "title": "routines",
+      "description": "Saved recurrent commuter routes",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "title": { "type": "string" },
+        "origin": { "type": "object" },
+        "destination": { "type": "object" },
+        "departureTime": { "type": "string" },
+        "daysOfWeek": { "type": "array", "items": { "type": "string" } },
+        "defaultSeats": { "type": "number" },
+        "defaultPrice": { "type": "number" },
+        "targetGroupId": { "type": "string" }
+      },
+      "required": ["title", "origin", "destination", "departureTime"]
+    }
+  }
+}
