@@ -15,6 +15,7 @@ import { GroupsView } from './components/GroupsView';
 import { GamificationView } from './components/GamificationView';
 import { GeminiVertexOptimizer } from './components/GeminiVertexOptimizer';
 import { ArchitectureBlueprintView } from './components/ArchitectureBlueprintView';
+import { SuperUserManagementView } from './components/SuperUserManagementView';
 import { UserProfileModal } from './components/UserProfileModal';
 import { UserAreaView } from './components/UserAreaView';
 import { AuthScreen } from './components/AuthScreen';
@@ -42,24 +43,30 @@ import {
   addFirestoreTransaction,
   updateFirestoreUserProfile,
   logoutAppUser,
+  saveUserSession,
+  getSavedUserSession,
+  clearUserSession,
   createFirestoreNotification,
   subscribeToNotifications,
   requestSettlementFromPassenger,
   confirmSettlementByDriver,
   rejectSettlementByDriver,
-  directSettlementByDriver
+  directSettlementByDriver,
+  auth
 } from './lib/firebase';
+import { onAuthStateChanged } from 'firebase/auth';
 import { Bell, CheckCircle, X, Car, Cloud, Database } from 'lucide-react';
 
 export default function App() {
-  const [users, setUsers] = useState<User[]>(INITIAL_USERS);
-  const [currentUser, setCurrentUser] = useState<User | null>(INITIAL_USERS[0]); // Default to Carlos Mendes, allows switching or guest
+  const [users, setUsers] = useState<User[]>([]);
+  // Restores session immediately if previously logged in (Gestão de Escalas pattern)
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [communities, setCommunities] = useState<Community[]>(INITIAL_COMMUNITIES);
   const [groups, setGroups] = useState<Group[]>(INITIAL_GROUPS);
   const [rides, setRides] = useState<Ride[]>(INITIAL_RIDES);
   const [ledger, setLedger] = useState<LedgerTransaction[]>(INITIAL_LEDGER);
   const [notifications, setNotifications] = useState<PushNotification[]>(INITIAL_NOTIFICATIONS);
-  const [activeTab, setActiveTab] = useState<'rides' | 'routines' | 'groups' | 'gamification' | 'ai_routes' | 'architecture' | 'user_area'>('rides');
+  const [activeTab, setActiveTab] = useState<'rides' | 'routines' | 'groups' | 'gamification' | 'ai_routes' | 'architecture' | 'user_area' | 'superuser_management'>('rides');
   const [selectedGroupForRide, setSelectedGroupForRide] = useState<Group | null>(null);
   const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
@@ -82,6 +89,7 @@ export default function App() {
     let unsubGroups: (() => void) | undefined;
     let unsubRides: (() => void) | undefined;
     let unsubTxs: (() => void) | undefined;
+    let unsubAuth: (() => void) | undefined;
 
     async function init() {
       try {
@@ -105,15 +113,51 @@ export default function App() {
               .forEach((u) => userMap.set(u.id, u));
             
             const uniqueUsers = Array.from(userMap.values());
-            if (uniqueUsers.length > 0) {
-              setUsers(uniqueUsers);
-              // Sync current user reference
-              setCurrentUser((prev) => {
-                if (!prev) return uniqueUsers[0] || null;
-                const updated = uniqueUsers.find((u) => u.id === prev.id);
-                return updated || prev || uniqueUsers[0];
-              });
-            }
+            setUsers(uniqueUsers);
+
+            // Sync or restore persistent user session (maintained until user asks to log off)
+            const savedSession = getSavedUserSession();
+            setCurrentUser((prev) => {
+              if (prev) {
+                const updated = uniqueUsers.find((u) => u.id === prev.id || (u.email && u.email.toLowerCase() === prev.email.toLowerCase()));
+                if (updated) {
+                  saveUserSession(updated);
+                  return updated;
+                }
+                return prev;
+              } else if (savedSession) {
+                const matched = uniqueUsers.find(
+                  (u) => (savedSession.id && u.id === savedSession.id) ||
+                         (savedSession.email && u.email && u.email.toLowerCase() === savedSession.email.toLowerCase())
+                );
+                if (matched) {
+                  saveUserSession(matched);
+                  return matched;
+                }
+              }
+              return null;
+            });
+          } else {
+            setUsers([]);
+          }
+        });
+
+        // Listen to Firebase Auth state
+        unsubAuth = onAuthStateChanged(auth, (fbUser) => {
+          if (fbUser && fbUser.email) {
+            const normalized = fbUser.email.trim().toLowerCase();
+            setCurrentUser((prev) => {
+              if (prev && prev.email?.trim().toLowerCase() === normalized) {
+                saveUserSession(prev);
+                return prev;
+              }
+              const found = users.find((u) => u.email?.trim().toLowerCase() === normalized);
+              if (found) {
+                saveUserSession(found);
+                return found;
+              }
+              return prev;
+            });
           }
         });
 
@@ -173,6 +217,7 @@ export default function App() {
       if (unsubGroups) unsubGroups();
       if (unsubRides) unsubRides();
       if (unsubTxs) unsubTxs();
+      if (unsubAuth) unsubAuth();
     };
   }, []);
 
@@ -1891,9 +1936,21 @@ export default function App() {
               setAuthModalMode(mode || 'login');
               setIsAuthModalOpen(true);
             }}
-            onNavigateToTab={(tab) => setActiveTab(tab)}
+            onNavigateToTab={(tab) => setActiveTab(tab as any)}
             onUpdateRoutine={handleUpdateRoutine}
             initialSection="identity"
+          />
+        )}
+
+        {activeTab === 'superuser_management' && isSuperUser(currentUser) && (
+          <SuperUserManagementView
+            currentUser={currentUser}
+            allUsers={users}
+            groups={groups}
+            onUsersUpdated={() => {
+              triggerToast('Base Atualizada', 'Dados do Firestore sincronizados.');
+            }}
+            onNavigateToTab={(tab) => setActiveTab(tab as any)}
           />
         )}
 
@@ -1909,9 +1966,11 @@ export default function App() {
         currentUser={currentUser}
         onUserUpdated={(updated) => {
           setCurrentUser(updated);
+          saveUserSession(updated);
           setUsers((prev) => prev.map((u) => (u.id === updated.id ? updated : u)));
         }}
         onUserDeleted={() => {
+          clearUserSession();
           setCurrentUser(null);
           triggerToast('Conta Excluída', 'Sua conta e dados associados foram excluídos do Firestore.');
         }}
@@ -1925,6 +1984,7 @@ export default function App() {
         allUsers={users}
         onAuthSuccess={(authenticatedUser) => {
           setCurrentUser(authenticatedUser);
+          saveUserSession(authenticatedUser);
           setUsers((prev) => {
             if (prev.some((u) => u.id === authenticatedUser.id)) {
               return prev.map((u) => (u.id === authenticatedUser.id ? authenticatedUser : u));

@@ -36,8 +36,8 @@ interface HeaderProps {
   onOpenAuth?: (mode?: 'login' | 'register') => void;
   onLogout?: () => void;
   isFirebaseConnected?: boolean;
-  activeTab: 'rides' | 'routines' | 'groups' | 'gamification' | 'ai_routes' | 'architecture' | 'user_area';
-  onChangeTab: (tab: 'rides' | 'routines' | 'groups' | 'gamification' | 'ai_routes' | 'architecture' | 'user_area') => void;
+  activeTab: 'rides' | 'routines' | 'groups' | 'gamification' | 'ai_routes' | 'architecture' | 'user_area' | 'superuser_management';
+  onChangeTab: (tab: 'rides' | 'routines' | 'groups' | 'gamification' | 'ai_routes' | 'architecture' | 'user_area' | 'superuser_management') => void;
   notifications: PushNotification[];
   onMarkNotificationsRead: () => void;
   onClearNotifications?: () => void;
@@ -142,22 +142,6 @@ export const Header: React.FC<HeaderProps> = ({
               </button>
             )}
 
-            {/* Direct Login / Register Button (Especially visible if not logged in) */}
-            {onOpenAuth && (
-              <button
-                id="btn-header-auth"
-                onClick={() => onOpenAuth('login')}
-                className={`flex items-center space-x-1.5 px-3 py-1.5 font-semibold text-xs rounded-xl border transition active:scale-95 cursor-pointer ${
-                  !currentUser
-                    ? 'bg-indigo-600 text-white hover:bg-indigo-700 border-indigo-700 shadow-sm'
-                    : 'hidden sm:flex bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border-indigo-200'
-                }`}
-              >
-                <LogIn className="w-3.5 h-3.5" />
-                <span>{currentUser ? 'Trocar Conta' : 'Entrar / Cadastrar'}</span>
-              </button>
-            )}
-
             {/* FCM Notifications Popover */}
             {currentUser && (
               <div className="relative">
@@ -253,7 +237,7 @@ export const Header: React.FC<HeaderProps> = ({
               </div>
             )}
 
-            {/* User Switcher & Profile Dropdown */}
+            {/* User Profile & Auth Dropdown */}
             {currentUser ? (
               <div className="relative">
                 <button
@@ -303,7 +287,7 @@ export const Header: React.FC<HeaderProps> = ({
                             {currentUser.name}
                             {isSuper && <Crown className="w-3 h-3 text-amber-600" />}
                           </p>
-                          <p className="text-[10px] text-slate-500">{currentUser.email}</p>
+                          <p className="text-[10px] text-slate-500 truncate max-w-[170px]">{currentUser.email}</p>
                         </div>
                         {onOpenProfile && (
                           <button
@@ -314,7 +298,7 @@ export const Header: React.FC<HeaderProps> = ({
                             className="px-2 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold text-[10px] rounded-lg border border-slate-200 flex items-center space-x-1 transition active:scale-95 cursor-pointer"
                           >
                             <Edit3 className="w-2.5 h-2.5" />
-                            <span>Rápido</span>
+                            <span>Editar</span>
                           </button>
                         )}
                       </div>
@@ -329,62 +313,23 @@ export const Header: React.FC<HeaderProps> = ({
                         <UserIcon className="w-3.5 h-3.5" />
                         <span>Abrir Área do Usuário & Preferências</span>
                       </button>
+
+                      {isSuper && (
+                        <button
+                          onClick={() => {
+                            setShowUserMenu(false);
+                            onChangeTab('superuser_management');
+                          }}
+                          className="w-full px-2.5 py-1.5 bg-amber-500 hover:bg-amber-600 text-amber-950 font-bold text-xs rounded-xl flex items-center justify-center space-x-1.5 transition active:scale-95 cursor-pointer shadow-xs border border-amber-400"
+                        >
+                          <Crown className="w-3.5 h-3.5 text-amber-950" />
+                          <span>Gestão de Usuários (SuperAdmin)</span>
+                        </button>
+                      )}
                     </div>
 
-                    {uniqueUsers.length > 1 && (
-                      <>
-                        <div className="px-2 py-1.5 text-xs text-slate-500 font-medium border-t border-slate-100 mt-1">
-                          Alternar Perfil:
-                        </div>
-
-                        <div className="max-h-60 overflow-y-auto space-y-1">
-                          {uniqueUsers.map((u) => {
-                            const userIsSuper = isSuperUser(u);
-                            return (
-                              <button
-                                key={u.id}
-                                onClick={() => {
-                                  onSelectUser(u);
-                                  setShowUserMenu(false);
-                                }}
-                                className={`w-full text-left p-2 rounded-xl flex items-center justify-between text-xs transition active:scale-95 cursor-pointer ${
-                                  currentUser.id === u.id
-                                    ? 'bg-indigo-50 text-indigo-900 font-medium border border-indigo-200'
-                                    : userIsSuper
-                                    ? 'bg-amber-50/50 hover:bg-amber-100/60 text-slate-800'
-                                    : 'hover:bg-slate-50 text-slate-700'
-                                }`}
-                              >
-                                <div className="flex items-center space-x-2.5">
-                                  <img src={u.avatar} alt={u.name} className="w-7 h-7 rounded-full object-cover" />
-                                  <div>
-                                    <p className="font-semibold text-slate-900 flex items-center gap-1">
-                                      {u.name}
-                                      {userIsSuper ? (
-                                        <span className="text-[9px] px-1 bg-amber-500 text-white rounded font-mono font-bold">
-                                          👑 SUPER
-                                        </span>
-                                      ) : (
-                                        <span className="text-[9px] px-1 bg-slate-100 text-slate-600 rounded font-mono">
-                                          {u.totalRidesOffered}🚗 {u.totalRidesTaken}🙋
-                                        </span>
-                                      )}
-                                    </p>
-                                    <p className="text-[10px] text-slate-500 truncate max-w-[150px]">
-                                      {userIsSuper ? 'silvano.kassio@gmail.com' : (u.ponto_encontro_default?.name || u.residentialAddress?.address?.split(',')[0] || 'São Paulo')}
-                                    </p>
-                                  </div>
-                                </div>
-                                {currentUser.id === u.id && <Check className="w-4 h-4 text-indigo-600" />}
-                              </button>
-                            );
-                          })}
-                        </div>
-                      </>
-                    )}
-
                     {/* Auth Actions in Menu */}
-                    <div className="pt-2 mt-2 border-t border-slate-100 space-y-1">
+                    <div className="pt-2 space-y-1">
                       {onOpenAuth && (
                         <>
                           <button
@@ -395,7 +340,7 @@ export const Header: React.FC<HeaderProps> = ({
                             className="w-full text-left px-2.5 py-1.5 rounded-lg text-xs font-semibold text-indigo-700 hover:bg-indigo-50 flex items-center space-x-2 transition cursor-pointer"
                           >
                             <LogIn className="w-3.5 h-3.5" />
-                            <span>Entrar / Trocar de Conta (Login)</span>
+                            <span>Entrar com Outra Conta</span>
                           </button>
                           <button
                             onClick={() => {
@@ -405,7 +350,7 @@ export const Header: React.FC<HeaderProps> = ({
                             className="w-full text-left px-2.5 py-1.5 rounded-lg text-xs font-semibold text-slate-700 hover:bg-slate-50 flex items-center space-x-2 transition cursor-pointer"
                           >
                             <UserPlus className="w-3.5 h-3.5 text-indigo-600" />
-                            <span>Cadastrar Novo Usuário</span>
+                            <span>Cadastrar Novo Perfil</span>
                           </button>
                         </>
                       )}
@@ -418,7 +363,7 @@ export const Header: React.FC<HeaderProps> = ({
                           className="w-full text-left px-2.5 py-1.5 rounded-lg text-xs font-semibold text-rose-600 hover:bg-rose-50 flex items-center space-x-2 transition cursor-pointer"
                         >
                           <LogOut className="w-3.5 h-3.5" />
-                          <span>Sair da Sessão (Modo Visitante)</span>
+                          <span>Sair da Conta (Logout)</span>
                         </button>
                       )}
                     </div>
@@ -430,84 +375,12 @@ export const Header: React.FC<HeaderProps> = ({
               <div className="relative">
                 <button
                   id="btn-guest-user-menu"
-                  onClick={() => setShowUserMenu(!showUserMenu)}
-                  className="flex items-center space-x-2 p-1.5 sm:px-3 sm:py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 border border-slate-200 text-slate-800 transition active:scale-95 shadow-2xs cursor-pointer"
+                  onClick={() => onOpenAuth ? onOpenAuth('login') : setShowUserMenu(!showUserMenu)}
+                  className="flex items-center space-x-2 px-3 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs transition active:scale-95 shadow-2xs cursor-pointer"
                 >
-                  <div className="w-7 h-7 sm:w-6 sm:h-6 rounded-full bg-slate-300 text-slate-700 flex items-center justify-center font-bold text-xs">
-                    ?
-                  </div>
-                  <div className="text-left hidden sm:block">
-                    <p className="text-xs font-semibold leading-tight text-slate-900">
-                      Modo Visitante
-                    </p>
-                    <p className="text-[10px] text-slate-500">
-                      Não logado
-                    </p>
-                  </div>
-                  <ChevronDown className="w-3.5 h-3.5 text-slate-400" />
+                  <LogIn className="w-3.5 h-3.5" />
+                  <span>Entrar / Cadastrar</span>
                 </button>
-
-                {showUserMenu && (
-                  <div 
-                    id="guest-switcher-dropdown"
-                    className="absolute right-0 mt-2 w-[calc(100vw-2rem)] sm:w-80 max-w-xs bg-white border border-slate-200 rounded-2xl shadow-xl p-2 z-50 animate-in fade-in slide-in-from-top-2 duration-150"
-                  >
-                    <div className="p-2 border-b border-slate-100">
-                      <p className="text-xs font-bold text-slate-900">Navegando como Visitante</p>
-                      <p className="text-[10px] text-slate-500 leading-relaxed">
-                        Faça login ou selecione um perfil abaixo para ter acesso completo:
-                      </p>
-                    </div>
-
-                    <div className="max-h-60 overflow-y-auto space-y-1 mt-1">
-                      {uniqueUsers.map((u) => {
-                        const userIsSuper = isSuperUser(u);
-                        return (
-                          <button
-                            key={u.id}
-                            onClick={() => {
-                              onSelectUser(u);
-                              setShowUserMenu(false);
-                            }}
-                            className="w-full text-left p-2 rounded-xl flex items-center justify-between text-xs hover:bg-indigo-50/70 text-slate-700 transition active:scale-95 cursor-pointer"
-                          >
-                            <div className="flex items-center space-x-2.5">
-                              <img src={u.avatar} alt={u.name} className="w-7 h-7 rounded-full object-cover" />
-                              <div>
-                                <p className="font-semibold text-slate-900 flex items-center gap-1">
-                                  {u.name}
-                                  {userIsSuper && (
-                                    <span className="text-[9px] px-1 bg-amber-500 text-white rounded font-mono font-bold">
-                                      👑 SUPER
-                                    </span>
-                                  )}
-                                </p>
-                                <p className="text-[10px] text-slate-500 truncate max-w-[150px]">
-                                  {userIsSuper ? 'silvano.kassio@gmail.com' : (u.institutionName || 'Comunidade')}
-                                </p>
-                              </div>
-                            </div>
-                          </button>
-                        );
-                      })}
-                    </div>
-
-                    {onOpenAuth && (
-                      <div className="pt-2 mt-2 border-t border-slate-100 space-y-1">
-                        <button
-                          onClick={() => {
-                            setShowUserMenu(false);
-                            onOpenAuth('login');
-                          }}
-                          className="w-full text-left px-2.5 py-1.5 rounded-lg text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 flex items-center space-x-2 transition cursor-pointer"
-                        >
-                          <LogIn className="w-3.5 h-3.5" />
-                          <span>Entrar com E-mail / Senha</span>
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                )}
               </div>
             )}
           </div>
@@ -584,6 +457,21 @@ export const Header: React.FC<HeaderProps> = ({
               </span>
             )}
           </button>
+
+          {isSuper && (
+            <button
+              id="tab-superuser-management"
+              onClick={() => onChangeTab('superuser_management')}
+              className={`px-4 py-2.5 sm:px-3.5 sm:py-2 min-h-[44px] sm:min-h-auto rounded-xl flex items-center space-x-2 sm:space-x-1.5 whitespace-nowrap transition active:scale-95 cursor-pointer ${
+                activeTab === 'superuser_management' 
+                  ? 'bg-amber-600 text-white font-bold shadow-2xs' 
+                  : 'text-amber-900 bg-amber-50 hover:bg-amber-100 border border-amber-300 font-bold'
+              }`}
+            >
+              <Crown className="w-4 h-4 text-amber-600" />
+              <span>Gestão de Usuários (SuperAdmin)</span>
+            </button>
+          )}
 
           {isSuper && (
             <button

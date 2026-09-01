@@ -120,22 +120,19 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
         return;
       }
 
-      // Check against Firestore / Auth
+      if (!loginPassword.trim()) {
+        setLoginError('Por favor, informe sua senha de acesso.');
+        setLoading(false);
+        return;
+      }
+
+      // Check against Firestore / Auth with credentials
       const matchedUser = await loginWithEmail(loginEmail, loginPassword);
       if (matchedUser) {
         onAuthSuccess(matchedUser);
         if (onClose) onClose();
       } else {
-        // Fallback: Check local memory or seed users
-        const localMatch = allUsers.find(
-          (u) => u.email.trim().toLowerCase() === loginEmail.trim().toLowerCase()
-        );
-        if (localMatch) {
-          onAuthSuccess(localMatch);
-          if (onClose) onClose();
-        } else {
-          setLoginError('Usuário não encontrado. Verifique seu e-mail ou faça seu cadastro.');
-        }
+        setLoginError('Usuário não encontrado. Verifique seu e-mail ou faça seu cadastro.');
       }
     } catch (err: any) {
       console.error('Login error:', err);
@@ -403,63 +400,18 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({
               <ArrowRight className="w-4 h-4" />
             </button>
 
-            {/* Fast login demo accounts & Guest Exploration */}
-            <div className="pt-3 border-t border-slate-100 space-y-2">
-              <div className="flex items-center justify-between">
-                <span className="text-xs sm:text-[11px] text-slate-700 font-bold block">
-                  Ou acesse com um perfil de demonstração:
-                </span>
-                <span className="text-[10px] text-indigo-600 font-mono font-semibold">1-Clique</span>
-              </div>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                {allUsers.slice(0, 5).map((u) => {
-                  const isSuper = (u.email || '').trim().toLowerCase() === 'silvano.kassio@gmail.com' || u.role === 'superadmin' || u.isSuperUser;
-                  return (
-                    <button
-                      key={u.id}
-                      type="button"
-                      onClick={() => {
-                        onAuthSuccess(u);
-                        if (onClose) onClose();
-                      }}
-                      className={`p-3 sm:p-2 min-h-[44px] rounded-xl text-left flex items-center space-x-2.5 transition cursor-pointer ${
-                        isSuper
-                          ? 'bg-amber-50/80 hover:bg-amber-100/90 border border-amber-300 text-amber-950 shadow-2xs col-span-1 sm:col-span-2'
-                          : 'bg-slate-50 hover:bg-indigo-50/70 border border-slate-200 hover:border-indigo-300'
-                      }`}
-                    >
-                      <img src={u.avatar} alt={u.name} className="w-8 h-8 sm:w-7 sm:h-7 rounded-full object-cover shrink-0 ring-2 ring-indigo-500/20" />
-                      <div className="min-w-0 flex-1">
-                        <p className="font-bold text-slate-900 truncate text-xs flex items-center gap-1.5">
-                          {u.name}
-                          {isSuper && (
-                            <span className="text-[10px] px-2 py-0.5 bg-amber-500 text-white font-bold rounded-md uppercase tracking-wider">
-                              👑 Superusuário
-                            </span>
-                          )}
-                        </p>
-                        <p className="text-[11px] sm:text-[10px] text-slate-500 truncate">
-                          {isSuper ? 'silvano.kassio@gmail.com • Acesso total a todas as páginas e dados' : `${u.totalRidesOffered}🚗 ${u.totalRidesTaken}🙋 • ${u.institutionName || 'Comunidade'}`}
-                        </p>
-                      </div>
-                    </button>
-                  );
-                })}
-              </div>
-
-              {/* Guest / Unauthenticated exploration button */}
-              <div className="pt-2">
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (onClose) onClose();
-                  }}
-                  className="w-full py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold text-xs rounded-xl border border-slate-200 flex items-center justify-center space-x-2 transition cursor-pointer"
-                >
-                  <Search className="w-3.5 h-3.5 text-slate-500" />
-                  <span>Continuar como Visitante (Pesquisar Caronas Oferecidas)</span>
-                </button>
-              </div>
+            {/* Guest / Unauthenticated exploration button */}
+            <div className="pt-3 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => {
+                  if (onClose) onClose();
+                }}
+                className="w-full py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold text-xs rounded-xl border border-slate-200 flex items-center justify-center space-x-2 transition cursor-pointer"
+              >
+                <Search className="w-3.5 h-3.5 text-slate-500" />
+                <span>Continuar como Visitante (Pesquisar Caronas Oferecidas)</span>
+              </button>
             </div>
           </form>
         ) : (

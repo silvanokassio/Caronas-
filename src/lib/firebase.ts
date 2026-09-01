@@ -180,6 +180,9 @@ export async function initializeFirebaseData(): Promise<void> {
           await updateDoc(uDoc.ref, { groups: cleanedGroups });
         }
       }
+
+      // Automatically purge any orphan groups without active users associated
+      await purgeOrphanGroupsFromFirestore();
     } catch (cleanErr) {
       console.warn('Note during cleanup of fictitious groups/communities:', cleanErr);
     }
@@ -398,6 +401,88 @@ export async function createFirestoreGroup(newGroup: Omit<Group, 'id'>): Promise
 export async function updateFirestoreGroup(groupId: string, updates: Partial<Group>): Promise<void> {
   const groupDoc = doc(db, 'groups', groupId);
   await updateDoc(groupDoc, sanitizeForFirestore(updates));
+}
+
+/**
+ * Scans all groups in Firestore and deletes any group that has no existing user associated.
+ * A group is orphan if:
+ * 1. None of its memberIds match an existing registered user in Firestore, AND
+ * 2. Its creatorId (if defined) does not match any existing registered user in Firestore.
+ */
+export async function purgeOrphanGroupsFromFirestore(): Promise<{
+  deletedCount: number;
+  deletedGroups: { id: string; name: string; reason: string }[];
+}> {
+  try {
+    const usersSnap = await getDocs(collection(db, 'users'));
+    const activeUserIds = new Set<string>();
+    const activeUserEmails = new Set<string>();
+
+    usersSnap.docs.forEach((d) => {
+      activeUserIds.add(d.id);
+      const data = d.data() as User;
+      if (data.email) activeUserEmails.add(data.email.trim().toLowerCase());
+    });
+
+    const groupsSnap = await getDocs(collection(db, 'groups'));
+    const deletedGroups: { id: string; name: string; reason: string }[] = [];
+
+    for (const gDoc of groupsSnap.docs) {
+      const gData = gDoc.data() as Group;
+      const gId = gDoc.id;
+      const members = gData.memberIds || [];
+      const creatorId = gData.creatorId;
+
+      // Check if any member exists in the active users table
+      const hasActiveMembers = members.some((mId) => activeUserIds.has(mId));
+      // Check if creator exists in active users table
+      const hasActiveCreator = creatorId ? activeUserIds.has(creatorId) : false;
+
+      if (!hasActiveMembers && !hasActiveCreator) {
+        // Group is orphan! Delete from Firestore
+        await deleteDoc(doc(db, 'groups', gId));
+        deletedGroups.push({
+          id: gId,
+          name: gData.name || 'Grupo sem nome',
+          reason: members.length === 0 ? 'Grupo sem membros cadastrados' : `Nenhum dos ${members.length} membro(s) existe no banco de usuários`,
+        });
+      }
+    }
+
+    console.log(`🧹 Expurgados ${deletedGroups.length} grupos órfãos sem usuários associados.`);
+    return {
+      deletedCount: deletedGroups.length,
+      deletedGroups,
+    };
+  } catch (err) {
+    console.error('Error purging orphan groups:', err);
+    return { deletedCount: 0, deletedGroups: [] };
+  }
+}
+
+export async function createFirestoreUserByAdmin(newUser: Omit<User, 'id'> & { customId?: string }): Promise<User> {
+  const userId = newUser.customId || `usr-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+  const userDocRef = doc(db, 'users', userId);
+
+  const fullUser: User = {
+    ...newUser,
+    id: userId,
+    createdAt: new Date().toISOString(),
+    rating: newUser.rating ?? 5.0,
+    saldo_caronas: newUser.saldo_caronas ?? 0,
+    totalRidesOffered: newUser.totalRidesOffered ?? 0,
+    totalRidesTaken: newUser.totalRidesTaken ?? 0,
+    groups: newUser.groups ?? [],
+    ponto_encontro_default: newUser.ponto_encontro_default ?? {
+      lat: -23.5714,
+      lng: -46.7082,
+      address: 'Ponto de Encontro Central',
+      name: 'Ponto de Encontro Central',
+    },
+  };
+
+  await setDoc(userDocRef, sanitizeForFirestore(fullUser));
+  return fullUser;
 }
 
 export async function deleteFirestoreGroup(groupId: string): Promise<void> {
@@ -909,28 +994,60 @@ export function subscribeToNotifications(userId: string, callback: (notification
 // ----------------------------------------------------------------------
 
 export async function loginWithEmail(email: string, password: string): Promise<User | null> {
+  const cleanEmail = (email || '').trim().toLowerCase();
+  const cleanPassword = (password || '').trim();
+
+  if (!cleanEmail) {
+    throw new Error('Por favor, informe seu e-mail cadastrado.');
+  }
+
+  if (!cleanPassword) {
+    throw new Error('Por favor, digite sua senha de acesso.');
+  }
+
   try {
-    // Try firebase auth first
+    let authSuccess = false;
+
+    // 1. Try Firebase Auth with credentials
     try {
-      await signInWithEmailAndPassword(auth, email, password);
+      const userCred = await signInWithEmailAndPassword(auth, cleanEmail, cleanPassword);
+      if (userCred.user) {
+        authSuccess = true;
+      }
     } catch (fbAuthErr: any) {
-      // If auth provider in console is not configured or in sandbox, we match with Firestore user records
-      console.warn('Firebase Auth notice (falling back to Firestore verification):', fbAuthErr?.message);
+      const code = fbAuthErr?.code;
+      if (code === 'auth/wrong-password' || code === 'auth/invalid-credential') {
+        throw new Error('Senha incorreta. Verifique suas credenciais.');
+      }
+      // If user not found in Firebase Auth or provider not enabled, proceed to verify Firestore record
     }
 
-    // Query or find user in Firestore by email
+    // 2. Query Firestore user doc
     const usersRef = collection(db, 'users');
     const snap = await getDocs(usersRef);
-    let matchedUser: User | null = null;
+    let matchedUser: (User & { password?: string }) | null = null;
 
     snap.forEach((docSnap) => {
-      const u = { id: docSnap.id, ...docSnap.data() } as User;
-      if (u.email.trim().toLowerCase() === email.trim().toLowerCase()) {
+      const u = { id: docSnap.id, ...docSnap.data() } as User & { password?: string };
+      if ((u.email || '').trim().toLowerCase() === cleanEmail) {
         matchedUser = u;
       }
     });
 
-    return matchedUser;
+    if (!matchedUser) {
+      throw new Error('Conta não encontrada para este e-mail. Verifique o endereço ou faça seu cadastro.');
+    }
+
+    // If Firebase Auth did not directly validate (e.g. registered via profile), check Firestore password if set
+    if (!authSuccess && (matchedUser as any).password) {
+      if ((matchedUser as any).password !== cleanPassword) {
+        throw new Error('Senha incorreta. Verifique a senha digitada.');
+      }
+    }
+
+    // Clean password from returned object
+    const { password: _, ...userWithoutPassword } = matchedUser as any;
+    return userWithoutPassword as User;
   } catch (error) {
     console.error('Login error:', error);
     throw error;
@@ -1077,6 +1194,42 @@ export async function loginWithGoogleAuth(defaultGroupIds: string[] = []): Promi
   }
 }
 
+const SESSION_KEY = 'caronaflow_active_user_session';
+
+export function saveUserSession(user: User): void {
+  try {
+    localStorage.setItem(SESSION_KEY, JSON.stringify({
+      id: user.id,
+      email: (user.email || '').trim().toLowerCase(),
+      name: user.name,
+      avatar: user.avatar,
+      savedAt: Date.now()
+    }));
+  } catch (e) {
+    console.warn('Could not save user session to localStorage:', e);
+  }
+}
+
+export function getSavedUserSession(): { id?: string; email?: string; name?: string } | null {
+  try {
+    const raw = localStorage.getItem(SESSION_KEY);
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch (e) {
+    return null;
+  }
+}
+
+export function clearUserSession(): void {
+  try {
+    localStorage.removeItem(SESSION_KEY);
+    localStorage.removeItem('caronaflow_current_user');
+    localStorage.removeItem('caronaflow_user_id');
+  } catch (e) {
+    console.warn('Could not clear user session:', e);
+  }
+}
+
 /**
  * Permanent deletion of a user account and associated data from Firestore
  */
@@ -1127,6 +1280,7 @@ export async function deleteFirestoreUser(userId: string): Promise<void> {
  */
 export async function deleteMyAccount(currentUser: User): Promise<void> {
   try {
+    clearUserSession();
     await deleteFirestoreUser(currentUser.id);
 
     // If currently signed in via Firebase Auth, delete auth account
@@ -1146,6 +1300,7 @@ export async function deleteMyAccount(currentUser: User): Promise<void> {
 }
 
 export async function logoutAppUser(): Promise<void> {
+  clearUserSession();
   try {
     await signOut(auth);
   } catch (e) {

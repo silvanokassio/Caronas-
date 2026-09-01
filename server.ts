@@ -6,7 +6,7 @@ import { sendEmail, getSmtpConfig } from './server/email';
 import { generateEmailForAction, generateEmailVerificationCodeTemplate, ConfirmationPayload } from './server/emailTemplates';
 
 const app = express();
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
 
 app.use(express.json());
 
