@@ -1,3 +1,5 @@
+import { User, GeoLocation } from '../types';
+
 export interface GeocodedPlace {
   name: string;
   address: string;
@@ -69,9 +71,9 @@ export const SP_PRESETS: GeocodedPlace[] = [
 /**
  * Gets the current real-time GPS coordinates of the user device
  */
-export async function getCurrentGPSPosition(): Promise<{ lat: number; lng: number }> {
+export async function getCurrentGPSPosition(timeoutMs = 5000): Promise<{ lat: number; lng: number }> {
   return new Promise((resolve, reject) => {
-    if (!navigator.geolocation) {
+    if (typeof window === 'undefined' || !navigator.geolocation) {
       reject(new Error('Geolocalização não é suportada neste navegador.'));
       return;
     }
@@ -96,11 +98,129 @@ export async function getCurrentGPSPosition(): Promise<{ lat: number; lng: numbe
       },
       {
         enableHighAccuracy: true,
-        timeout: 10000,
-        maximumAge: 30000,
+        timeout: timeoutMs,
+        maximumAge: 60000,
       }
     );
   });
+}
+
+export interface ResolvedUserLocation {
+  lat: number;
+  lng: number;
+  address: string;
+  label: string;
+  source: 'residential' | 'meeting' | 'profile' | 'cached';
+}
+
+/**
+ * Resolves the user's registered address (residential address or default meeting point)
+ * from the user object or cached browser storage.
+ */
+export function resolveUserAddress(user?: User | null): ResolvedUserLocation | null {
+  // 1. Direct user object check
+  if (user) {
+    if (
+      user.residentialAddress &&
+      typeof user.residentialAddress.lat === 'number' &&
+      !isNaN(user.residentialAddress.lat) &&
+      user.residentialAddress.lat !== 0 &&
+      typeof user.residentialAddress.lng === 'number' &&
+      !isNaN(user.residentialAddress.lng) &&
+      user.residentialAddress.lng !== 0
+    ) {
+      return {
+        lat: user.residentialAddress.lat,
+        lng: user.residentialAddress.lng,
+        address: user.residentialAddress.address || 'Endereço Residencial Cadastrado',
+        label: 'Endereço Residencial',
+        source: 'residential',
+      };
+    }
+
+    if (
+      user.ponto_encontro_default &&
+      typeof user.ponto_encontro_default.lat === 'number' &&
+      !isNaN(user.ponto_encontro_default.lat) &&
+      user.ponto_encontro_default.lat !== 0 &&
+      typeof user.ponto_encontro_default.lng === 'number' &&
+      !isNaN(user.ponto_encontro_default.lng) &&
+      user.ponto_encontro_default.lng !== 0
+    ) {
+      return {
+        lat: user.ponto_encontro_default.lat,
+        lng: user.ponto_encontro_default.lng,
+        address: user.ponto_encontro_default.address || user.ponto_encontro_default.name || 'Ponto de Encontro Padrão',
+        label: 'Ponto de Encontro',
+        source: 'meeting',
+      };
+    }
+  }
+
+  // 2. LocalStorage cached user or session fallback
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      const cachedFull = localStorage.getItem('caronaflow_current_user');
+      if (cachedFull) {
+        const parsed = JSON.parse(cachedFull);
+        if (
+          parsed.residentialAddress?.lat &&
+          parsed.residentialAddress?.lng &&
+          !isNaN(parsed.residentialAddress.lat) &&
+          !isNaN(parsed.residentialAddress.lng)
+        ) {
+          return {
+            lat: parsed.residentialAddress.lat,
+            lng: parsed.residentialAddress.lng,
+            address: parsed.residentialAddress.address || 'Endereço Residencial Cadastrado',
+            label: 'Endereço Residencial',
+            source: 'residential',
+          };
+        }
+        if (
+          parsed.ponto_encontro_default?.lat &&
+          parsed.ponto_encontro_default?.lng &&
+          !isNaN(parsed.ponto_encontro_default.lat) &&
+          !isNaN(parsed.ponto_encontro_default.lng)
+        ) {
+          return {
+            lat: parsed.ponto_encontro_default.lat,
+            lng: parsed.ponto_encontro_default.lng,
+            address: parsed.ponto_encontro_default.address || parsed.ponto_encontro_default.name || 'Ponto de Encontro',
+            label: 'Ponto de Encontro',
+            source: 'meeting',
+          };
+        }
+      }
+
+      const sessionRaw = localStorage.getItem('caronaflow_active_user_session');
+      if (sessionRaw) {
+        const session = JSON.parse(sessionRaw);
+        if (session.residentialAddress?.lat && session.residentialAddress?.lng) {
+          return {
+            lat: session.residentialAddress.lat,
+            lng: session.residentialAddress.lng,
+            address: session.residentialAddress.address || 'Endereço Residencial Cadastrado',
+            label: 'Endereço Residencial',
+            source: 'cached',
+          };
+        }
+        if (session.ponto_encontro_default?.lat && session.ponto_encontro_default?.lng) {
+          return {
+            lat: session.ponto_encontro_default.lat,
+            lng: session.ponto_encontro_default.lng,
+            address: session.ponto_encontro_default.address || session.ponto_encontro_default.name || 'Ponto de Encontro',
+            label: 'Ponto de Encontro',
+            source: 'cached',
+          };
+        }
+      }
+    }
+  } catch (err) {
+    // Non-blocking fallback
+  }
+
+  return null;
 }
 
 /**
@@ -212,6 +332,9 @@ export function calculateDistanceKm(
   lat2: number,
   lon2: number
 ): number {
+  if (lat1 == null || lon1 == null || lat2 == null || lon2 == null) return 0;
+  if (isNaN(lat1) || isNaN(lon1) || isNaN(lat2) || isNaN(lon2)) return 0;
+  if (lat1 === 0 && lon1 === 0 && lat2 === 0 && lon2 === 0) return 0;
   if (lat1 === lat2 && lon1 === lon2) return 0;
   
   const R = 6371; // Earth's mean radius in km

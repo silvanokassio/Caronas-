@@ -18,6 +18,7 @@ import {
   Compass
 } from 'lucide-react';
 import { Ride, User, Group } from '../types';
+import { isRideInPast, canJoinRide } from '../lib/dateUtils';
 
 interface NearbyRidesMapViewProps {
   rides: (Ride & { distanceFromUser: number })[];
@@ -57,6 +58,7 @@ export const NearbyRidesMapView: React.FC<NearbyRidesMapViewProps> = ({
     const seen = new Set<string>();
     return rides.filter((r) => {
       if (!r || !r.id || seen.has(r.id)) return false;
+      if (isRideInPast(r)) return false;
       seen.add(r.id);
       return true;
     });
@@ -239,7 +241,7 @@ export const NearbyRidesMapView: React.FC<NearbyRidesMapViewProps> = ({
 
             <div>
               <span class="text-slate-400 font-bold block text-[9px] uppercase">🏁 Destino</span>
-              <p class="font-medium text-slate-700 leading-tight">${ride.destination.address}</p>
+              <p class="font-medium text-slate-700 leading-tight">${ride.destinationAlias || ride.destination.alias || ride.destination.name || ride.destination.address}</p>
             </div>
 
             <div class="flex items-center justify-between pt-1 border-t border-slate-100 text-[10px]">
@@ -323,7 +325,8 @@ export const NearbyRidesMapView: React.FC<NearbyRidesMapViewProps> = ({
       }).bindPopup(`
         <div class="p-1 text-xs">
           <strong class="text-rose-900 block font-bold">Destino:</strong>
-          <span>${selectedRide.destination.address}</span>
+          <span class="font-semibold block">${selectedRide.destinationAlias || selectedRide.destination.alias || selectedRide.destination.name || selectedRide.destination.address}</span>
+          ${(selectedRide.destinationAlias || selectedRide.destination.alias || selectedRide.destination.name) ? `<span class="text-[10px] text-slate-500 block">${selectedRide.destination.address}</span>` : ''}
         </div>
       `);
       markersGroup.addLayer(destMarker);
@@ -503,9 +506,16 @@ export const NearbyRidesMapView: React.FC<NearbyRidesMapViewProps> = ({
 
             <div className="flex items-start space-x-2.5">
               <MapPin className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
-              <div>
+              <div className="flex-1 min-w-0">
                 <span className="text-slate-500 font-semibold block text-[11px]">Destino Final da Viagem:</span>
-                <p className="text-slate-900 font-bold">{selectedRide.destination.address}</p>
+                <p className="text-slate-900 font-bold break-words">
+                  {selectedRide.destinationAlias || selectedRide.destination.alias || selectedRide.destination.name || selectedRide.destination.address}
+                </p>
+                {(selectedRide.destinationAlias || selectedRide.destination.alias || selectedRide.destination.name) && (
+                  <span className="text-[11px] text-slate-500 block truncate" title={selectedRide.destination.address}>
+                    {selectedRide.destination.address}
+                  </span>
+                )}
               </div>
             </div>
 
@@ -579,9 +589,17 @@ export const NearbyRidesMapView: React.FC<NearbyRidesMapViewProps> = ({
                   <span className="px-4 py-2 min-h-[44px] bg-slate-100 text-slate-500 text-xs font-medium rounded-xl flex items-center justify-center">
                     Vagas Esgotadas
                   </span>
+                ) : !canJoinRide(selectedRide) ? (
+                  <span className="px-4 py-2 min-h-[44px] bg-slate-100 text-slate-500 text-xs font-medium rounded-xl flex items-center justify-center">
+                    {selectedRide.status === 'concluida' ? 'Viagem Concluída' : 'Viagem Encerrada (Data Passada)'}
+                  </span>
                 ) : (
                   <button
                     onClick={() => {
+                      if (!canJoinRide(selectedRide)) {
+                        alert('Esta carona pertence ao passado ou já foi concluída.');
+                        return;
+                      }
                       const isGroupMember =
                         selectedRide.visibility === 'group' &&
                         selectedRide.targetGroupId &&
@@ -595,9 +613,19 @@ export const NearbyRidesMapView: React.FC<NearbyRidesMapViewProps> = ({
                   </button>
                 )}
               </div>
+            ) : !canJoinRide(selectedRide) ? (
+              <span className="px-4 py-2 min-h-[44px] bg-slate-100 text-slate-500 text-xs font-medium rounded-xl flex items-center justify-center">
+                {selectedRide.status === 'concluida' ? 'Pedido Concluído' : 'Pedido Encerrado (Data Passada)'}
+              </span>
             ) : (
               <button
-                onClick={() => onOfferForRequest(selectedRide)}
+                onClick={() => {
+                  if (!canJoinRide(selectedRide)) {
+                    alert('Este pedido de carona pertence ao passado ou já foi concluído.');
+                    return;
+                  }
+                  onOfferForRequest(selectedRide);
+                }}
                 className="w-full sm:w-auto px-5 py-2.5 min-h-[44px] bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-xl shadow-xs transition active:scale-95 cursor-pointer flex items-center justify-center space-x-1.5"
               >
                 <Car className="w-4 h-4" />

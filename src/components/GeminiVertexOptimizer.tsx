@@ -48,7 +48,7 @@ export const GeminiVertexOptimizer: React.FC<GeminiVertexOptimizerProps> = ({
   });
 
   // FCM Simulator state
-  const [fcmTargetEvent, setFcmTargetEvent] = useState<'NEW_RIDE_GROUP' | 'DRIVER_STARTED' | 'RIDE_ACCEPTED'>('NEW_RIDE_GROUP');
+  const [fcmTargetEvent, setFcmTargetEvent] = useState<'NEW_RIDE_GROUP' | 'DRIVER_STARTED' | 'RIDE_ACCEPTED' | 'RIDE_CANCELLED'>('NEW_RIDE_GROUP');
 
   const handleRunAiOptimization = async () => {
     setLoadingAi(true);
@@ -102,6 +102,9 @@ export const GeminiVertexOptimizer: React.FC<GeminiVertexOptimizerProps> = ({
     } else if (fcmTargetEvent === 'DRIVER_STARTED') {
       title = '📍 O motorista iniciou o percurso!';
       body = 'O trajeto foi iniciado. Acompanhe a aproximação em tempo real no mapa.';
+    } else if (fcmTargetEvent === 'RIDE_CANCELLED') {
+      title = '❌ Viagem Cancelada pelo Motorista';
+      body = 'A carona para Av. Paulista foi cancelada pelo motorista. Sua vaga foi liberada e nenhum rateio foi cobrado.';
     } else {
       title = '✅ Seu pedido de carona foi aceito!';
       body = 'Você foi confirmado na carona.';
@@ -328,6 +331,7 @@ export const GeminiVertexOptimizer: React.FC<GeminiVertexOptimizerProps> = ({
               <option value="NEW_RIDE_GROUP">1. "Nova carona disponível no seu grupo" (USP / Poli)</option>
               <option value="DRIVER_STARTED">2. "Motorista iniciou o percurso" (Tracking ao vivo ativado)</option>
               <option value="RIDE_ACCEPTED">3. "Seu pedido de carona foi aceito" (Confirmação de vaga)</option>
+              <option value="RIDE_CANCELLED">4. "Viagem Cancelada pelo Motorista" (Alerta ao Passageiro)</option>
             </select>
           </div>
 

@@ -11,10 +11,14 @@ export interface ConfirmationPayload {
     | 'PROPOSAL_ACCEPTED'
     | 'RIDE_STARTED'
     | 'RIDE_COMPLETED'
+    | 'RIDE_CANCELLED'
+    | 'PASSENGER_REMOVED'
+    | 'NEW_RIDE_GROUP'
     | 'WELCOME';
   recipientEmail: string;
   recipientName: string;
   rideId?: string;
+  cancellationReason?: string;
   rideData?: {
     originAddress?: string;
     destinationAddress?: string;
@@ -30,13 +34,14 @@ export interface ConfirmationPayload {
     meetingPointAddress?: string;
     groupName?: string;
     notes?: string;
+    cancellationReason?: string;
     carbonSavingKg?: number;
   };
 }
 
 export function generateEmailForAction(payload: ConfirmationPayload): { subject: string; html: string } {
   const { type, recipientName, rideData } = payload;
-  const appUrl = process.env.APP_URL || 'https://caronaflow.app';
+  const appUrl = process.env.APP_URL || 'https://caronasflow.apponline.ia.br';
 
   switch (type) {
     case 'RIDE_CREATED': {
@@ -107,6 +112,94 @@ export function generateEmailForAction(payload: ConfirmationPayload): { subject:
             url: appUrl,
           },
           footerNote: 'Dica: Você pode iniciar a viagem pelo app para ativar a telemetria em tempo real para os passageiros.',
+        }),
+      };
+    }
+
+    case 'NEW_RIDE_GROUP': {
+      const groupDisplayName = rideData?.groupName ? `no Grupo "${rideData.groupName}"` : 'no seu Grupo';
+      const origShort = rideData?.originAddress?.split(',')[0] || 'Origem';
+      const destShort = rideData?.destinationAddress?.split(',')[0] || 'Destino';
+      const subject = `🚗 Nova Viagem ${groupDisplayName}: ${origShort} ➔ ${destShort}`;
+      const contentHtml = `
+        <p>Olá, <strong>${recipientName}</strong>!</p>
+        <p>Uma nova viagem foi disponibilizada por <strong>${rideData?.driverName || 'um membro'}</strong> ${groupDisplayName} no CaronaFlow.</p>
+        
+        <div class="card">
+          <div style="font-weight: 700; font-size: 15px; margin-bottom: 12px; color: #0f172a;">
+            📋 Detalhes da Viagem
+          </div>
+          <div class="route-box">
+            <div class="route-step">
+              <span class="route-step-icon">📍</span>
+              <div><strong>Origem:</strong> ${rideData?.originAddress || 'Não informado'}</div>
+            </div>
+            <div class="route-step">
+              <span class="route-step-icon">🎯</span>
+              <div><strong>Destino:</strong> ${rideData?.destinationAddress || 'Não informado'}</div>
+            </div>
+          </div>
+          
+          <div class="info-row">
+            <span class="info-label">Data de Saída:</span>
+            <span class="info-value">${rideData?.departureDate || 'Hoje'}</span>
+          </div>
+          <div class="info-row">
+            <span class="info-label">Horário de Saída:</span>
+            <span class="info-value">${rideData?.departureTime || '--:--'}</span>
+          </div>
+          <div class="info-row">
+            <span class="info-label">Valor de Rateio:</span>
+            <span class="info-value" style="color: #059669;">R$ ${(rideData?.price ?? 0).toFixed(2)} / vaga</span>
+          </div>
+          <div class="info-row">
+            <span class="info-label">Vagas Disponíveis:</span>
+            <span class="info-value">${rideData?.totalSeats || 4} vagas</span>
+          </div>
+          ${rideData?.driverName ? `
+          <div class="info-row">
+            <span class="info-label">Motorista:</span>
+            <span class="info-value">${rideData.driverName}</span>
+          </div>
+          ` : ''}
+          ${rideData?.vehicleModel ? `
+          <div class="info-row">
+            <span class="info-label">Veículo:</span>
+            <span class="info-value">${rideData.vehicleModel} ${rideData.vehiclePlate ? `(${rideData.vehiclePlate})` : ''}</span>
+          </div>
+          ` : ''}
+          ${rideData?.groupName ? `
+          <div class="info-row">
+            <span class="info-label">Grupo:</span>
+            <span class="info-value">${rideData.groupName}</span>
+          </div>
+          ` : ''}
+          ${rideData?.notes ? `
+          <div class="info-row">
+            <span class="info-label">Observações:</span>
+            <span class="info-value">${rideData.notes}</span>
+          </div>
+          ` : ''}
+        </div>
+
+        <p style="font-size: 13px; color: #475569;">
+          Garanta seu assento com antecedência pelo aplicativo.
+        </p>
+      `;
+
+      return {
+        subject,
+        html: buildHtmlEmailTemplate({
+          title: subject,
+          badgeText: 'Nova Viagem no Grupo',
+          headline: 'Nova Carona Disponível',
+          recipientName,
+          contentHtml,
+          actionButton: {
+            label: 'Ver Viagem e Reservar Vaga',
+            url: appUrl,
+          },
+          footerNote: 'Você recebeu esta mensagem porque é membro do grupo no CaronaFlow.',
         }),
       };
     }
@@ -409,30 +502,52 @@ export function generateEmailForAction(payload: ConfirmationPayload): { subject:
     }
 
     case 'RIDE_STARTED': {
-      const subject = `🚦 Sua Carona Começou! Acompanhe o trajeto em tempo real`;
+      const driverName = rideData?.driverName || 'Seu motorista';
+      const subject = `🚗 ${driverName} iniciou a viagem! Acompanhe o trajeto em tempo real`;
       const contentHtml = `
-        <p>O motorista <strong>${rideData?.driverName || 'Motorista'}</strong> iniciou a viagem!</p>
+        <p>Olá <strong>${recipientName}</strong>,</p>
+        <p>O motorista <strong>${driverName}</strong> acabou de iniciar a viagem no CaronaFlow!</p>
         
         <div class="card">
           <div style="font-weight: 700; font-size: 15px; margin-bottom: 12px; color: #0f172a;">
-            🛰️ Telemetria & Rastreamento
+            🛰️ Detalhes da Viagem & Telemetria em Tempo Real
           </div>
           <div class="info-row">
             <span class="info-label">Motorista:</span>
-            <span class="info-value">${rideData?.driverName || 'Não informado'}</span>
+            <span class="info-value">${driverName}</span>
           </div>
+          ${rideData?.vehicleModel ? `
           <div class="info-row">
             <span class="info-label">Veículo:</span>
-            <span class="info-value">${rideData?.vehicleModel || 'Carro cadastrado'} ${rideData?.vehiclePlate ? `(${rideData.vehiclePlate})` : ''}</span>
+            <span class="info-value">${rideData.vehicleModel} ${rideData.vehiclePlate ? `(${rideData.vehiclePlate})` : ''}</span>
           </div>
+          ` : ''}
+          ${rideData?.originAddress ? `
+          <div class="info-row">
+            <span class="info-label">Origem:</span>
+            <span class="info-value">${rideData.originAddress}</span>
+          </div>
+          ` : ''}
           <div class="info-row">
             <span class="info-label">Destino:</span>
             <span class="info-value">${rideData?.destinationAddress || 'Não informado'}</span>
           </div>
+          ${rideData?.departureDate ? `
+          <div class="info-row">
+            <span class="info-label">Data:</span>
+            <span class="info-value">${rideData.departureDate}</span>
+          </div>
+          ` : ''}
+        </div>
+
+        <div style="background-color: #ecfdf5; border: 1px solid #a7f3d0; border-radius: 8px; padding: 12px; margin: 16px 0;">
+          <p style="margin: 0; font-size: 13px; color: #065f46; font-weight: 600;">
+            📍 Dica importante: Dirija-se ao seu ponto de encontro combinado com antecedência para garantir um embarque rápido e seguro.
+          </p>
         </div>
 
         <p style="font-size: 13px; color: #475569;">
-          Acompanhe o mapa interativo no CaronaFlow com velocidade, próximas paradas e estimativa de chegada (ETA).
+          Abra o CaronaFlow para acompanhar a rota ao vivo, o deslocamento do veículo no mapa e a estimativa de chegada (ETA).
         </p>
       `;
 
@@ -440,14 +555,15 @@ export function generateEmailForAction(payload: ConfirmationPayload): { subject:
         subject,
         html: buildHtmlEmailTemplate({
           title: subject,
-          badgeText: 'Viagem em Andamento',
+          badgeText: 'Viagem Iniciada',
           headline: 'Motorista a caminho!',
           recipientName,
           contentHtml,
           actionButton: {
-            label: 'Ver Mapa em Tempo Real',
+            label: 'Acompanhar Trajeto ao Vivo no App',
             url: appUrl,
           },
+          footerNote: 'Aviso prioritário em tempo real emitido pelo CaronaFlow através do canal oficial contato@apponline.ia.br.',
         }),
       };
     }
@@ -494,6 +610,189 @@ export function generateEmailForAction(payload: ConfirmationPayload): { subject:
             label: 'Avaliar Carona no App',
             url: appUrl,
           },
+        }),
+      };
+    }
+
+    case 'RIDE_CANCELLED': {
+      const originShort = rideData?.originAddress?.split(',')[0] || 'Origem';
+      const destShort = rideData?.destinationAddress?.split(',')[0] || 'Destino';
+      const dateFormatted = rideData?.departureDate || 'Hoje';
+      const reason = rideData?.cancellationReason || rideData?.notes;
+      const subject = `❌ Viagem Cancelada: ${originShort} ➔ ${destShort} (${dateFormatted})`;
+      
+      const contentHtml = `
+        <div style="background: #fef2f2; border: 1px solid #fecaca; border-radius: 14px; padding: 16px 18px; margin-bottom: 18px;">
+          <div style="font-weight: 800; font-size: 14px; color: #991b1b; margin-bottom: 6px; display: flex; align-items: center; gap: 6px;">
+            ⚠️ Aviso Importante: Viagem Cancelada pelo Motorista
+          </div>
+          <p style="margin: 0; font-size: 13px; color: #b91c1c; line-height: 1.6;">
+            Olá, <strong>${recipientName}</strong>. Informamos que a viagem programada na qual você estava cadastrado(a) como passageiro(a) foi <strong>cancelada ou excluída</strong> pelo motorista responsável.
+          </p>
+        </div>
+
+        <div class="card">
+          <div style="font-weight: 700; font-size: 15px; margin-bottom: 14px; color: #0f172a;">
+            📋 Resumo da Viagem Cancelada
+          </div>
+          <div class="route-box" style="border-left-color: #ef4444;">
+            <div class="route-step">
+              <span class="route-step-icon">📍</span>
+              <div><strong>Origem:</strong> ${rideData?.originAddress || 'Não informado'}</div>
+            </div>
+            <div class="route-step">
+              <span class="route-step-icon">🎯</span>
+              <div><strong>Destino:</strong> ${rideData?.destinationAddress || 'Não informado'}</div>
+            </div>
+          </div>
+          
+          <div class="info-row">
+            <span class="info-label">Motorista:</span>
+            <span class="info-value"><strong>${rideData?.driverName || 'Motorista'}</strong></span>
+          </div>
+          <div class="info-row">
+            <span class="info-label">Data e Horário:</span>
+            <span class="info-value">${rideData?.departureDate || 'Data programada'} às ${rideData?.departureTime || '--:--'}</span>
+          </div>
+          ${rideData?.vehicleModel ? `
+          <div class="info-row">
+            <span class="info-label">Veículo:</span>
+            <span class="info-value">${rideData.vehicleModel} ${rideData.vehiclePlate ? `• Placa: ${rideData.vehiclePlate}` : ''}</span>
+          </div>
+          ` : ''}
+          ${rideData?.groupName ? `
+          <div class="info-row">
+            <span class="info-label">Grupo / Comunidade:</span>
+            <span class="info-value">${rideData.groupName}</span>
+          </div>
+          ` : ''}
+          ${reason ? `
+          <div class="info-row" style="background: #fff1f2; padding: 10px 14px; border-radius: 10px; margin-top: 10px; border: 1px solid #ffe4e6;">
+            <span class="info-label" style="color: #9f1239; font-weight: 700;">Motivo informado:</span>
+            <span class="info-value" style="color: #881337; font-style: italic;">"${reason}"</span>
+          </div>
+          ` : ''}
+        </div>
+
+        <div class="card" style="background: #f0fdf4; border: 1px solid #bbf7d0; margin-top: 14px;">
+          <div style="font-weight: 700; font-size: 13px; margin-bottom: 6px; color: #166534;">
+            🛡️ Sua Segurança e Vaga
+          </div>
+          <p style="margin: 0; font-size: 12px; color: #15803d; line-height: 1.6;">
+            • Sua vaga foi cancelada no sistema e <strong>nenhum valor de rateio ou débito foi efetuado</strong> em sua conta.<br />
+            • A sua solicitação de vaga foi liberada e você já pode pesquisar e solicitar carona em outros veículos disponíveis na mesma rota e horário.
+          </p>
+        </div>
+
+        <p style="font-size: 13px; color: #475569; margin-top: 16px; line-height: 1.5;">
+          Abra o CaronaFlow para encontrar outras vagas compatíveis com a sua rotina ou publicar um pedido direto para seus colegas de grupo.
+        </p>
+      `;
+
+      return {
+        subject,
+        html: buildHtmlEmailTemplate({
+          title: subject,
+          badgeText: 'Viagem Cancelada',
+          headline: 'Aviso de Cancelamento de Viagem',
+          recipientName,
+          contentHtml,
+          actionButton: {
+            label: 'Buscar Outra Carona no CaronaFlow',
+            url: appUrl,
+          },
+          footerNote: 'CaronaFlow • Notificações em tempo real para passageiros e motoristas.',
+        }),
+      };
+    }
+
+    case 'PASSENGER_REMOVED': {
+      const originShort = rideData?.originAddress?.split(',')[0] || 'Origem';
+      const destShort = rideData?.destinationAddress?.split(',')[0] || 'Destino';
+      const dateFormatted = rideData?.departureDate || 'Hoje';
+      const reason = payload.cancellationReason || rideData?.cancellationReason || rideData?.notes || 'Não informado pelo motorista';
+      const subject = `⚠️ Vaga Cancelada: Exclusão da Carona para ${destShort} (${dateFormatted})`;
+
+      const contentHtml = `
+        <div style="background: #fff7ed; border: 1px solid #fed7aa; border-radius: 14px; padding: 16px 18px; margin-bottom: 18px;">
+          <div style="font-weight: 800; font-size: 14px; color: #c2410c; margin-bottom: 6px; display: flex; align-items: center; gap: 6px;">
+            ⚠️ Aviso de Exclusão de Vaga pelo Motorista
+          </div>
+          <p style="margin: 0; font-size: 13px; color: #9a3412; line-height: 1.6;">
+            Olá, <strong>${recipientName}</strong>. Informamos que o motorista <strong>${rideData?.driverName || 'Motorista'}</strong> excluiu a sua reserva na carona com destino a <strong>${destShort}</strong>.
+          </p>
+        </div>
+
+        <div class="card">
+          <div style="font-weight: 700; font-size: 15px; margin-bottom: 14px; color: #0f172a;">
+            📋 Detalhes do Itinerário
+          </div>
+          <div class="route-box" style="border-left-color: #f97316;">
+            <div class="route-step">
+              <span class="route-step-icon">📍</span>
+              <div><strong>Origem:</strong> ${rideData?.originAddress || 'Não informado'}</div>
+            </div>
+            <div class="route-step">
+              <span class="route-step-icon">🎯</span>
+              <div><strong>Destino:</strong> ${rideData?.destinationAddress || 'Não informado'}</div>
+            </div>
+          </div>
+          
+          <div class="info-row">
+            <span class="info-label">Motorista:</span>
+            <span class="info-value"><strong>${rideData?.driverName || 'Motorista'}</strong></span>
+          </div>
+          <div class="info-row">
+            <span class="info-label">Data e Horário:</span>
+            <span class="info-value">${rideData?.departureDate || 'Data programada'} às ${rideData?.departureTime || '--:--'}</span>
+          </div>
+          ${rideData?.vehicleModel ? `
+          <div class="info-row">
+            <span class="info-label">Veículo:</span>
+            <span class="info-value">${rideData.vehicleModel} ${rideData.vehiclePlate ? `• Placa: ${rideData.vehiclePlate}` : ''}</span>
+          </div>
+          ` : ''}
+          ${rideData?.groupName ? `
+          <div class="info-row">
+            <span class="info-label">Grupo:</span>
+            <span class="info-value">${rideData.groupName}</span>
+          </div>
+          ` : ''}
+
+          <div class="info-row" style="background: #fff7ed; padding: 12px 14px; border-radius: 10px; margin-top: 12px; border: 1px solid #ffedd5;">
+            <span class="info-label" style="color: #c2410c; font-weight: 800; display: block; margin-bottom: 4px;">Justificativa Informada pelo Motorista:</span>
+            <span class="info-value" style="color: #9a3412; font-style: italic; font-weight: 600; font-size: 13.5px; display: block;">"${reason}"</span>
+          </div>
+        </div>
+
+        <div class="card" style="background: #f0fdf4; border: 1px solid #bbf7d0; margin-top: 14px;">
+          <div style="font-weight: 700; font-size: 13px; margin-bottom: 6px; color: #166534;">
+            🛡️ Sua Segurança e Finanças
+          </div>
+          <p style="margin: 0; font-size: 12px; color: #15803d; line-height: 1.6;">
+            • Sua vaga foi liberada e <strong>nenhum valor de rateio ou débito foi efetuado</strong> em sua conta.<br />
+            • Você já pode pesquisar e reservar novas vagas em outras caronas convergentes diretamente no CaronaFlow.
+          </p>
+        </div>
+
+        <p style="font-size: 13px; color: #475569; margin-top: 16px; line-height: 1.5;">
+          Acesse o aplicativo para explorar rotas alternativas de colegas de grupo com trajetos e horários semelhantes.
+        </p>
+      `;
+
+      return {
+        subject,
+        html: buildHtmlEmailTemplate({
+          title: subject,
+          badgeText: 'Vaga Cancelada',
+          headline: 'Aviso de Exclusão de Passageiro',
+          recipientName,
+          contentHtml,
+          actionButton: {
+            label: 'Buscar Outras Caronas no CaronaFlow',
+            url: appUrl,
+          },
+          footerNote: 'CaronaFlow • Notificações em tempo real para passageiros e motoristas.',
         }),
       };
     }
@@ -556,8 +855,74 @@ export function generateEmailForAction(payload: ConfirmationPayload): { subject:
 }
 
 /**
- * Generates security verification code email sent from contato@apponline.ia.br
+ * Generates password reset code email sent from contato@apponline.ia.br
  */
+export function generatePasswordResetCodeTemplate({
+  code,
+  recipientName,
+  expiresInMinutes = 15,
+}: {
+  code: string;
+  recipientName?: string;
+  expiresInMinutes?: number;
+}): { subject: string; html: string } {
+  const subject = `🔑 Recuperação de Senha: ${code} - CaronaFlow`;
+  const appUrl = process.env.APP_URL || 'https://caronasflow.apponline.ia.br';
+
+  const contentHtml = `
+    <p>Recebemos uma solicitação para <strong>redefinir a senha</strong> da sua conta no <strong>CaronaFlow</strong>.</p>
+    <p>Para prosseguir e cadastrar uma nova senha com segurança, utilize o código PIN de 6 dígitos abaixo no aplicativo:</p>
+
+    <div style="background: #f8fafc; border: 2px dashed #4f46e5; border-radius: 16px; padding: 24px; text-align: center; margin: 24px 0;">
+      <span style="display: block; font-size: 12px; font-weight: 700; color: #4338ca; text-transform: uppercase; letter-spacing: 2px; margin-bottom: 8px;">
+        Código de Recuperação
+      </span>
+      <span style="display: inline-block; font-size: 38px; font-weight: 900; letter-spacing: 8px; color: #1e1b4b; font-family: monospace; background: #ffffff; padding: 12px 28px; border-radius: 12px; border: 1px solid #c7d2fe; box-shadow: 0 4px 12px rgba(79, 70, 229, 0.08);">
+        ${code}
+      </span>
+      <span style="display: block; font-size: 12px; color: #64748b; margin-top: 14px;">
+        ⏱️ Este código de segurança expira em <strong>${expiresInMinutes} minutos</strong>.
+      </span>
+    </div>
+
+    <div class="card" style="background: #fffbeb; border: 1px solid #fde68a;">
+      <div style="font-weight: 700; font-size: 13px; margin-bottom: 6px; color: #92400e;">
+        ⚠️ Não solicitou a recuperação de senha?
+      </div>
+      <p style="margin: 0; font-size: 12px; color: #78350f; line-height: 1.5;">
+        Se você não fez essa solicitação, sua senha atual permanece inalterada e segura. Você pode desconsiderar este e-mail tranquilamente.
+      </p>
+    </div>
+
+    <div class="card" style="margin-top: 12px;">
+      <div style="font-weight: 700; font-size: 13px; margin-bottom: 8px; color: #0f172a;">
+        🛡️ Recomendações de Segurança:
+      </div>
+      <p style="margin: 0; font-size: 12px; color: #475569; line-height: 1.5;">
+        • Enviado oficialmente por <strong>contato@apponline.ia.br</strong>.<br />
+        • Crie senhas fortes com no mínimo 6 caracteres, mesclando letras e números.<br />
+        • Nunca informe este código para outra pessoa.
+      </p>
+    </div>
+  `;
+
+  return {
+    subject,
+    html: buildHtmlEmailTemplate({
+      title: subject,
+      badgeText: 'Recuperação de Acesso',
+      headline: 'Redefinição de Senha',
+      recipientName,
+      contentHtml,
+      actionButton: {
+        label: 'Abrir Tela de Login',
+        url: appUrl,
+      },
+      footerNote: 'CaronaFlow • Segurança e Transparência na Rede de Caronas',
+    }),
+  };
+}
+
 export function generateEmailVerificationCodeTemplate({
   code,
   recipientName,
@@ -568,7 +933,7 @@ export function generateEmailVerificationCodeTemplate({
   expiresInMinutes?: number;
 }): { subject: string; html: string } {
   const subject = `🔐 Código de Validação de E-mail: ${code} - CaronaFlow`;
-  const appUrl = process.env.APP_URL || 'https://caronaflow.app';
+  const appUrl = process.env.APP_URL || 'https://caronasflow.apponline.ia.br';
 
   const contentHtml = `
     <p>Você solicitou a validação do seu endereço de e-mail no <strong>CaronaFlow</strong>.</p>

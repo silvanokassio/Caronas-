@@ -27,18 +27,20 @@ import { calculateOptimizedRoute } from '../lib/routeOptimization';
 import { subscribeToTracking } from '../lib/firebase';
 import { calculateDistanceKm } from '../lib/geo';
 
-interface PassengerLiveTrackingModalProps {
+export interface PassengerLiveTrackingModalProps {
   ride: Ride | null;
-  isOpen: boolean;
+  isOpen?: boolean;
   onClose: () => void;
-  currentUser: User | null;
+  currentUser?: User | null;
+  passengerLocation?: { lat: number; lng: number };
 }
 
 export const PassengerLiveTrackingModal: React.FC<PassengerLiveTrackingModalProps> = ({
   ride,
-  isOpen,
+  isOpen = true,
   onClose,
-  currentUser,
+  currentUser = null,
+  passengerLocation,
 }) => {
   const mapContainerRef = useRef<HTMLDivElement | null>(null);
   const mapInstanceRef = useRef<L.Map | null>(null);

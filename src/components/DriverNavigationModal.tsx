@@ -22,26 +22,29 @@ import {
   ChevronDown,
   ChevronUp,
   Maximize2,
-  Compass
+  Compass,
+  Bell
 } from 'lucide-react';
 import { Ride, User, PassengerParticipant } from '../types';
 import { calculateOptimizedRoute, RouteStop } from '../lib/routeOptimization';
 import { saveTrackingPoint } from '../lib/firebase';
 
-interface DriverNavigationModalProps {
+export interface DriverNavigationModalProps {
   ride: Ride | null;
-  isOpen: boolean;
+  isOpen?: boolean;
   onClose: () => void;
-  currentUser: User | null;
+  currentUser?: User | null;
   onCompleteRide?: (rideId: string) => void;
+  onStartRide?: (rideId: string) => void | Promise<void>;
 }
 
 export const DriverNavigationModal: React.FC<DriverNavigationModalProps> = ({
   ride,
-  isOpen,
+  isOpen = true,
   onClose,
-  currentUser,
+  currentUser = null,
   onCompleteRide,
+  onStartRide,
 }) => {
   const mapContainerRef = useRef<HTMLDivElement | null>(null);
   const mapInstanceRef = useRef<L.Map | null>(null);
@@ -418,6 +421,33 @@ export const DriverNavigationModal: React.FC<DriverNavigationModalProps> = ({
           </div>
         </header>
 
+        {/* Banner de Viagem Agendada: Alerta para Iniciar Trajeto e Notificar Passageiros */}
+        {ride.status === 'agendada' && onStartRide && (
+          <div className="px-3.5 py-2.5 bg-gradient-to-r from-emerald-950/90 via-slate-900 to-slate-900 border-b border-emerald-500/40 flex flex-col sm:flex-row items-center justify-between gap-2.5 shrink-0 z-20">
+            <div className="flex items-center space-x-2 text-xs text-emerald-200">
+              <div className="w-6 h-6 rounded-full bg-emerald-500/20 flex items-center justify-center shrink-0">
+                <Bell className="w-3.5 h-3.5 text-emerald-400" />
+              </div>
+              <span>
+                Esta viagem está <strong>agendada</strong>. Ao iniciar, os passageiros recebem aviso em tempo real por <strong>e-mail</strong> e <strong>notificação push</strong>.
+              </span>
+            </div>
+            <button
+              id="btn-start-ride-navigation-banner"
+              type="button"
+              onClick={async () => {
+                if (onStartRide) {
+                  await onStartRide(ride.id);
+                }
+              }}
+              className="w-full sm:w-auto px-4 py-2 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 active:scale-95 text-white font-bold text-xs rounded-xl shadow-md shadow-emerald-950/30 transition flex items-center justify-center space-x-2 shrink-0 cursor-pointer"
+            >
+              <Play className="w-4 h-4 fill-white" />
+              <span>Iniciar Viagem Agora</span>
+            </button>
+          </div>
+        )}
+
         {/* Scrollable Container with Map in High Focus + Route Drawer Below */}
         <div className="flex-1 overflow-y-auto custom-scrollbar flex flex-col bg-slate-950">
           
@@ -517,6 +547,17 @@ export const DriverNavigationModal: React.FC<DriverNavigationModalProps> = ({
                 >
                   <ExternalLink className="w-3.5 h-3.5" />
                   <span>Google Maps</span>
+                </a>
+
+                <a
+                  href={routePlan.wazeNextStopUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="px-2.5 py-1.5 bg-cyan-600 hover:bg-cyan-500 active:scale-95 text-white text-[11px] font-bold rounded-xl shadow-md flex items-center gap-1.5 transition cursor-pointer"
+                  title="Navegar com o Waze"
+                >
+                  <ExternalLink className="w-3.5 h-3.5" />
+                  <span>Waze</span>
                 </a>
 
                 <button

@@ -30,9 +30,26 @@ import {
   CalendarDays,
   History,
   X,
-  CheckCheck
+  XCircle,
+  CheckCheck,
+  Building2,
+  Pencil,
+  UserX,
+  RefreshCw,
+  ArrowLeft,
+  Zap,
+  ArrowLeftRight,
+  Repeat,
+  BookmarkCheck,
+  Coins,
+  CheckCircle2
 } from 'lucide-react';
-import { Ride, User, Group, PendingRequest, isSuperUser, Vehicle, getUserVehicles, GeoLocation } from '../types';
+import { Ride, User, Group, PendingRequest, isSuperUser, Vehicle, getUserVehicles, GeoLocation, PassengerParticipant, TripSegmentType } from '../types';
+import { getSegmentLabel, getSegmentShortBadge, calculateSegmentPrice } from '../lib/segmentUtils';
+import { JoinRideSegmentModal } from './JoinRideSegmentModal';
+import { RequestSegmentChangeModal } from './RequestSegmentChangeModal';
+import { PassengerEditRideModal } from './PassengerEditRideModal';
+import { RemovePassengerModal } from './RemovePassengerModal';
 import { LiveRideMap } from './LiveRideMap';
 import { NearbyRidesMapView } from './NearbyRidesMapView';
 import { LocationPickerModal } from './LocationPickerModal';
@@ -40,15 +57,19 @@ import { RideRouteModal } from './RideRouteModal';
 import { WelcomeRideRequestModal } from './WelcomeRideRequestModal';
 import { DriverNavigationModal } from './DriverNavigationModal';
 import { PassengerLiveTrackingModal } from './PassengerLiveTrackingModal';
+import { EditRideModal } from './EditRideModal';
 import { getCurrentGPSPosition, reverseGeocode, calculateDistanceKm } from '../lib/geo';
 import { 
   getRideDateTime, 
   isRideInPast, 
+  isRideUpcomingOrToday,
   formatRideFriendlyDate, 
   matchesDateTimeFilter, 
   getRelativeDateStr, 
   getUpcomingTimeStr,
-  DateTimeFilterOptions 
+  DateTimeFilterOptions,
+  canJoinRide,
+  canLeaveRide
 } from '../lib/dateUtils';
 import confetti from 'canvas-confetti';
 import { Crown, Lock, LogIn } from 'lucide-react';
@@ -58,9 +79,11 @@ interface RidesViewProps {
   rides: Ride[];
   groups: Group[];
   onCreateRide: (newRide: Partial<Ride>) => void;
-  onJoinRide: (rideId: string, autoAccept: boolean) => void;
+  onJoinRide: (rideId: string, autoAccept: boolean, segmentType?: TripSegmentType) => void;
   onAcceptRequest: (rideId: string, request: PendingRequest) => void;
   onRejectRequest: (rideId: string, userId: string) => void;
+  onRequestSegmentChange?: (rideId: string, requestedSegment: TripSegmentType) => void;
+  onRespondSegmentChange?: (rideId: string, requestId: string, approve: boolean) => void;
   onSendProposalForRequest?: (
     requestRideId: string,
     proposalData: {
@@ -81,9 +104,23 @@ interface RidesViewProps {
   onRejectProposal?: (requestRideId: string, proposalId: string) => void;
   onStartRide: (rideId: string) => void;
   onCompleteRide: (rideId: string) => void;
+  onCancelRide?: (rideId: string, reason?: string) => Promise<void> | void;
+  onCancelReservation?: (rideId: string, userId: string) => Promise<void> | void;
+  onRemovePassenger?: (rideId: string, passengerUserId: string, justification: string) => Promise<void> | void;
+  onUpdateRide?: (rideId: string, updates: Partial<Ride>) => Promise<void> | void;
+  onUpdatePassengerParticipation?: (
+    rideId: string,
+    updates: {
+      segmentType: TripSegmentType;
+      meetingPoint: GeoLocation;
+      passengerNotes?: string;
+    }
+  ) => Promise<void> | void;
   onOpenAuth?: (mode?: 'login' | 'register') => void;
   initialGroupForRide?: Group | null;
   onClearInitialGroupForRide?: () => void;
+  allUsers?: User[];
+  onNavigateToTab?: (tab: string) => void;
 }
 
 interface UserLocationRef {
@@ -101,18 +138,47 @@ export const RidesView: React.FC<RidesViewProps> = ({
   onJoinRide,
   onAcceptRequest,
   onRejectRequest,
+  onRequestSegmentChange,
+  onRespondSegmentChange,
   onSendProposalForRequest,
   onAcceptProposal,
   onRejectProposal,
   onStartRide,
   onCompleteRide,
+  onCancelRide,
+  onCancelReservation,
+  onRemovePassenger,
+  onUpdateRide,
+  onUpdatePassengerParticipation,
   onOpenAuth,
   initialGroupForRide,
   onClearInitialGroupForRide,
+  allUsers = [],
+  onNavigateToTab,
 }) => {
   const [showModal, setShowModal] = useState(false);
   const [modalMode, setModalMode] = useState<'offer' | 'request' | 'search'>('offer');
   const isSuper = isSuperUser(currentUser);
+
+  // Editing Ride state (Advanced Mode: creator can edit their ride details)
+  const [editingRide, setEditingRide] = useState<Ride | null>(null);
+
+  // Cancellation Modal state (for driver to cancel/delete a ride with passenger alert)
+  const [rideToCancel, setRideToCancel] = useState<Ride | null>(null);
+  const [cancelReason, setCancelReason] = useState<string>('');
+  const [isCanceling, setIsCanceling] = useState<boolean>(false);
+
+  // Passenger Removal Modal state (for driver to exclude passenger with justification)
+  const [passengerToRemove, setPassengerToRemove] = useState<{
+    ride: Ride;
+    passenger: PassengerParticipant;
+  } | null>(null);
+
+  // Passenger Edit Ride Modal state (for passenger to edit their leg: ida e volta / só ida / só volta, meeting point, and notes)
+  const [passengerRideToEdit, setPassengerRideToEdit] = useState<{
+    ride: Ride;
+    passenger: PassengerParticipant;
+  } | null>(null);
   
   // Tracking Ride ID
   const [activeTrackingRideId, setActiveTrackingRideId] = useState<string | null>(
@@ -154,7 +220,7 @@ export const RidesView: React.FC<RidesViewProps> = ({
       return {
         lat: currentUser.residentialAddress.lat,
         lng: currentUser.residentialAddress.lng,
-        label: currentUser.residentialAddress.address || 'Endereço Residencial',
+        label: currentUser.residentialAddress.address || 'Endereço Padrão',
         source: 'residential',
       };
     }
@@ -194,7 +260,6 @@ export const RidesView: React.FC<RidesViewProps> = ({
   const [customDate, setCustomDate] = useState<string>('');
   const [timeFilterMode, setTimeFilterMode] = useState<'all' | 'from_now' | 'morning' | 'afternoon' | 'night' | 'custom'>('all');
   const [customTime, setCustomTime] = useState<string>('');
-  const [showPastRides, setShowPastRides] = useState<boolean>(false);
   const [myRidesFilterTab, setMyRidesFilterTab] = useState<'all' | 'upcoming' | 'history'>('upcoming');
 
   // User vehicles list
@@ -217,6 +282,10 @@ export const RidesView: React.FC<RidesViewProps> = ({
   // Modal Link Mode: 'avulsa' (sem vínculo de grupo, pública) ou 'group' (com vínculo de grupo)
   const [modalLinkMode, setModalLinkMode] = useState<'avulsa' | 'group'>('avulsa');
 
+  // Segment modal states
+  const [rideForJoinSegment, setRideForJoinSegment] = useState<{ ride: Ride; canAutoAccept: boolean } | null>(null);
+  const [rideForSegmentChange, setRideForSegmentChange] = useState<{ ride: Ride; passenger: PassengerParticipant } | null>(null);
+
   // Unified Form State (for Creating Rides or Requests)
   const [formData, setFormData] = useState({
     rideType: 'offer' as 'offer' | 'request',
@@ -229,8 +298,11 @@ export const RidesView: React.FC<RidesViewProps> = ({
     destAddress: currentUser?.routine?.destination?.address || 'Av. Prof. Luciano Gualberto, 380 - Butantã (USP)',
     destLat: currentUser?.routine?.destination?.lat || -23.5574,
     destLng: currentUser?.routine?.destination?.lng || -46.7314,
+    destAlias: currentUser?.institutionName || '',
     departureDate: getRelativeDateStr(0),
     departureTime: getUpcomingTimeStr(1),
+    returnTime: '17:30',
+    segmentType: 'ida_e_volta' as TripSegmentType,
     totalSeats: primaryVehicle?.availableSeats || 3,
     requestSeats: 1,
     price: 6.50,
@@ -269,8 +341,11 @@ export const RidesView: React.FC<RidesViewProps> = ({
         destAddress: initialGroupForRide.defaultDestination?.address || prev.destAddress,
         destLat: initialGroupForRide.defaultDestination?.lat || prev.destLat,
         destLng: initialGroupForRide.defaultDestination?.lng || prev.destLng,
+        destAlias: initialGroupForRide.defaultDestination?.alias || initialGroupForRide.name || prev.destAlias,
         price: initialGroupForRide.defaultPrice ?? prev.price,
         departureTime: initialGroupForRide.defaultDepartureTime || prev.departureTime,
+        returnTime: initialGroupForRide.defaultReturnTime || prev.returnTime || '17:30',
+        segmentType: (initialGroupForRide.defaultReturnTime ? 'ida_e_volta' : 'somente_ida') as TripSegmentType,
         visibility: 'group',
         targetGroupId: initialGroupForRide.id,
         targetGroupName: initialGroupForRide.name,
@@ -306,7 +381,7 @@ export const RidesView: React.FC<RidesViewProps> = ({
         if (isMounted) {
           console.warn('GPS initial detection fallback to residential:', err);
           setUserLocation(defaultResidential);
-          setGpsStatusMessage('GPS indisponível: Usando seu endereço residencial cadastrado');
+          setGpsStatusMessage('GPS indisponível: Usando seu endereço padrão cadastrado');
         }
       } finally {
         if (isMounted) {
@@ -339,7 +414,7 @@ export const RidesView: React.FC<RidesViewProps> = ({
     } catch (err: any) {
       alert(err?.message || 'Não foi possível obter a posição GPS. Mantendo localização cadastrada.');
       setUserLocation(defaultResidential);
-      setGpsStatusMessage('Usando seu endereço residencial cadastrado');
+      setGpsStatusMessage('Usando seu endereço padrão cadastrado');
     } finally {
       setIsLocatingGPS(false);
     }
@@ -347,7 +422,7 @@ export const RidesView: React.FC<RidesViewProps> = ({
 
   const handleUseResidential = () => {
     setUserLocation(defaultResidential);
-    setGpsStatusMessage('Usando seu endereço residencial cadastrado');
+    setGpsStatusMessage('Usando seu endereço padrão cadastrado');
   };
 
   // Quick address helpers for form
@@ -380,6 +455,128 @@ export const RidesView: React.FC<RidesViewProps> = ({
       originLat: lat,
       originLng: lng,
     }));
+  };
+
+  // Quick Pre-fill state and helpers for "Rotina Fixa e Trajetos"
+  const [appliedRoutineFeedback, setAppliedRoutineFeedback] = useState<string | null>(null);
+
+  const userRoutine = currentUser?.routine;
+  const userMeetingPoint = currentUser?.ponto_encontro_default;
+  const userRes = currentUser?.residentialAddress;
+
+  const routineOrigin = useMemo<GeoLocation>(() => {
+    if (userRoutine?.origin?.address) return userRoutine.origin;
+    if (userRes?.address) return { address: userRes.address, lat: userRes.lat, lng: userRes.lng, name: 'Residência' };
+    if (userMeetingPoint?.address) return userMeetingPoint;
+    return { address: 'Rua Fradique Coutinho, 1200 - Pinheiros', lat: -23.5539, lng: -46.6896, name: 'Pinheiros' };
+  }, [userRoutine, userRes, userMeetingPoint]);
+
+  const routineDest = useMemo<GeoLocation>(() => {
+    if (userRoutine?.destination?.address) return userRoutine.destination;
+    return {
+      address: 'Av. Prof. Luciano Gualberto, 380 - Butantã (USP)',
+      lat: -23.5574,
+      lng: -46.7314,
+      alias: currentUser?.institutionName || 'Polo Universitário / Empresa',
+      name: currentUser?.institutionName || 'Destino Habitual'
+    };
+  }, [userRoutine, currentUser]);
+
+  const todayDayName = useMemo(() => {
+    const days = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'];
+    return days[new Date().getDay()];
+  }, []);
+
+  const isTodayRoutineDay = useMemo(() => {
+    if (!userRoutine?.daysOfWeek || userRoutine.daysOfWeek.length === 0) return false;
+    return userRoutine.daysOfWeek.includes(todayDayName);
+  }, [userRoutine, todayDayName]);
+
+  const handleApplyRoutine = (mode: 'outbound' | 'return' | 'meeting') => {
+    if (mode === 'outbound') {
+      const groupToLink = userRoutine?.targetGroupId
+        ? availableGroupsForUser.find((g) => g.id === userRoutine.targetGroupId)
+        : undefined;
+
+      if (groupToLink) {
+        setModalLinkMode('group');
+      }
+
+      setFormData((prev) => ({
+        ...prev,
+        description: userRoutine?.title || `Trajeto Habitual: ${routineOrigin.address.split(',')[0]} ➔ ${routineDest.alias || routineDest.address.split(',')[0]}`,
+        originAddress: routineOrigin.address,
+        originLat: routineOrigin.lat,
+        originLng: routineOrigin.lng,
+        destAddress: routineDest.address,
+        destLat: routineDest.lat,
+        destLng: routineDest.lng,
+        destAlias: routineDest.alias || routineDest.name || currentUser?.institutionName || prev.destAlias,
+        departureTime: userRoutine?.departureTime || '07:30',
+        totalSeats: userRoutine?.defaultSeats || primaryVehicle?.availableSeats || prev.totalSeats,
+        price: userRoutine?.defaultPrice ?? prev.price,
+        targetGroupId: groupToLink ? groupToLink.id : prev.targetGroupId,
+        targetGroupName: groupToLink ? groupToLink.name : prev.targetGroupName,
+        visibility: groupToLink ? 'group' : prev.visibility,
+      }));
+
+      setAppliedRoutineFeedback('⚡ Dados da Rotina Fixa (Ida) aplicados com sucesso!');
+      setTimeout(() => setAppliedRoutineFeedback(null), 4000);
+    } else if (mode === 'return') {
+      setFormData((prev) => ({
+        ...prev,
+        description: userRoutine?.title
+          ? `Retorno: ${userRoutine.title}`
+          : `Retorno: ${routineDest.alias || routineDest.address.split(',')[0]} ➔ ${routineOrigin.address.split(',')[0]}`,
+        originAddress: routineDest.address,
+        originLat: routineDest.lat,
+        originLng: routineDest.lng,
+        destAddress: routineOrigin.address,
+        destLat: routineOrigin.lat,
+        destLng: routineOrigin.lng,
+        destAlias: routineOrigin.name || routineOrigin.address.split(',')[0] || 'Residência / Ponto Inicial',
+        departureTime: prev.returnTime || '17:30',
+        totalSeats: userRoutine?.defaultSeats || primaryVehicle?.availableSeats || prev.totalSeats,
+        price: userRoutine?.defaultPrice ?? prev.price,
+      }));
+
+      setAppliedRoutineFeedback('🔄 Trajeto de Retorno (Volta Invertida) aplicado com sucesso!');
+      setTimeout(() => setAppliedRoutineFeedback(null), 4000);
+    } else if (mode === 'meeting') {
+      if (userMeetingPoint) {
+        setFormData((prev) => ({
+          ...prev,
+          originAddress: userMeetingPoint.address,
+          originLat: userMeetingPoint.lat,
+          originLng: userMeetingPoint.lng,
+        }));
+        setAppliedRoutineFeedback('📍 Ponto de Encontro Padrão aplicado como origem!');
+        setTimeout(() => setAppliedRoutineFeedback(null), 4000);
+      }
+    }
+  };
+
+  const handleSetFormOriginRoutine = () => {
+    setFormData((prev) => ({
+      ...prev,
+      originAddress: routineOrigin.address,
+      originLat: routineOrigin.lat,
+      originLng: routineOrigin.lng,
+    }));
+    setAppliedRoutineFeedback('Origem da rotina aplicada!');
+    setTimeout(() => setAppliedRoutineFeedback(null), 3000);
+  };
+
+  const handleSetFormDestRoutine = () => {
+    setFormData((prev) => ({
+      ...prev,
+      destAddress: routineDest.address,
+      destLat: routineDest.lat,
+      destLng: routineDest.lng,
+      destAlias: routineDest.alias || routineDest.name || prev.destAlias,
+    }));
+    setAppliedRoutineFeedback('Destino da rotina aplicado!');
+    setTimeout(() => setAppliedRoutineFeedback(null), 3000);
   };
 
   const handleCreateSubmit = (e: React.FormEvent) => {
@@ -438,9 +635,14 @@ export const RidesView: React.FC<RidesViewProps> = ({
         address: formData.destAddress,
         lat: formData.destLat,
         lng: formData.destLng,
+        alias: formData.destAlias ? formData.destAlias.trim() : undefined,
+        name: formData.destAlias ? formData.destAlias.trim() : undefined,
       },
+      destinationAlias: formData.destAlias ? formData.destAlias.trim() : undefined,
       departureDate: formData.departureDate,
       departureTime: formData.departureTime,
+      segmentType: formData.segmentType || 'ida_e_volta',
+      returnTime: formData.segmentType === 'ida_e_volta' ? (formData.returnTime || undefined) : undefined,
       totalSeats: isOffer ? Number(formData.totalSeats) : Number(formData.requestSeats || 1),
       price: isOffer ? Number(formData.price) : 0,
       visibility: effectiveVisibility,
@@ -454,7 +656,13 @@ export const RidesView: React.FC<RidesViewProps> = ({
       requesterNote: formData.rideType === 'request' ? formData.requesterNote : undefined,
       waypointsOrder: [
         { lat: formData.originLat, lng: formData.originLng, label: 'Origem', type: 'origin', orderIndex: 0 },
-        { lat: formData.destLat, lng: formData.destLng, label: 'Destino Final', type: 'destination', orderIndex: 1 },
+        { 
+          lat: formData.destLat, 
+          lng: formData.destLng, 
+          label: formData.destAlias?.trim() || 'Destino Final', 
+          type: 'destination', 
+          orderIndex: 1 
+        },
       ],
     });
 
@@ -465,6 +673,10 @@ export const RidesView: React.FC<RidesViewProps> = ({
   const handleOfferForRequest = (ride: Ride) => {
     if (!currentUser) {
       onOpenAuth?.('login');
+      return;
+    }
+    if (!canJoinRide(ride)) {
+      alert('Este pedido de carona pertence ao passado ou já foi concluído/cancelado.');
       return;
     }
     setSelectedRideForWelcomeModal(ride);
@@ -498,10 +710,10 @@ export const RidesView: React.FC<RidesViewProps> = ({
       })
       .filter((ride) => {
         if (myRidesFilterTab === 'upcoming') {
-          return !isRideInPast(ride) || ride.status === 'em_andamento';
+          return isRideUpcomingOrToday(ride);
         }
         if (myRidesFilterTab === 'history') {
-          return isRideInPast(ride) && ride.status !== 'em_andamento';
+          return (!isRideUpcomingOrToday(ride) || ride.status === 'concluida') && ride.status !== 'em_andamento';
         }
         return true;
       })
@@ -543,13 +755,13 @@ export const RidesView: React.FC<RidesViewProps> = ({
         };
       })
       .filter((ride) => {
-        // Date & Time verification (Considers day, time and status - filters out past rides by default)
+        // Date & Time verification (Considers day, time and status - strictly excludes past rides by date and time)
         const matchesTime = matchesDateTimeFilter(ride, {
           dateMode: dateFilterMode,
           customDate: customDate,
           timeMode: timeFilterMode,
           customTime: customTime,
-          allowPast: showPastRides,
+          allowPast: false,
         });
 
         if (!matchesTime) {
@@ -629,8 +841,9 @@ export const RidesView: React.FC<RidesViewProps> = ({
         // Filter by Search Query
         if (searchQuery.trim()) {
           const q = searchQuery.toLowerCase().trim();
+          const destAlias = (ride.destinationAlias || ride.destination?.alias || ride.destination?.name || '').toLowerCase();
           const matchesOrigin = (ride.origin.address || '').toLowerCase().includes(q);
-          const matchesDest = (ride.destination.address || '').toLowerCase().includes(q);
+          const matchesDest = (ride.destination.address || '').toLowerCase().includes(q) || destAlias.includes(q);
           const matchesDriver = (ride.driverName || '').toLowerCase().includes(q);
           const matchesNote = (ride.requesterNote || '').toLowerCase().includes(q);
           if (!matchesOrigin && !matchesDest && !matchesDriver && !matchesNote) {
@@ -648,7 +861,7 @@ export const RidesView: React.FC<RidesViewProps> = ({
         // Secondary sort by proximity
         return a.distanceFromUser - b.distanceFromUser;
       });
-  }, [rides, currentUser, isSuper, userLocation, searchType, searchGroupId, maxRadiusKm, seatsFilter, dateFilterMode, customDate, timeFilterMode, customTime, showPastRides, searchQuery]);
+  }, [rides, currentUser, isSuper, userLocation, searchType, searchGroupId, maxRadiusKm, seatsFilter, dateFilterMode, customDate, timeFilterMode, customTime, searchQuery]);
 
   const activeRideForMap = rides.find((r) => r.id === activeTrackingRideId) || rides[0];
 
@@ -1031,9 +1244,16 @@ export const RidesView: React.FC<RidesViewProps> = ({
 
                     <div className="flex items-start space-x-2.5">
                       <MapPin className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
-                      <div>
+                      <div className="min-w-0 flex-1">
                         <span className="text-slate-500 font-medium text-xs">Destino:</span>
-                        <p className="text-slate-900 font-semibold leading-snug">{ride.destination.address}</p>
+                        <p className="text-slate-900 font-semibold leading-snug break-words">
+                          {ride.destinationAlias || ride.destination.alias || ride.destination.name || ride.destination.address}
+                        </p>
+                        {(ride.destinationAlias || ride.destination.alias || ride.destination.name) && (
+                          <span className="text-[11px] text-slate-500 block truncate" title={ride.destination.address}>
+                            {ride.destination.address}
+                          </span>
+                        )}
                       </div>
                     </div>
 
@@ -1086,6 +1306,32 @@ export const RidesView: React.FC<RidesViewProps> = ({
                         </span>
                       </div>
                     </div>
+
+                    {/* Segment Badge & Return Time info */}
+                    <div className="flex items-center justify-between flex-wrap gap-2 pt-2 border-t border-slate-200/50">
+                      <div className="flex items-center space-x-1.5 flex-wrap gap-y-1">
+                        <span className={`px-2.5 py-0.5 rounded-lg text-[11px] font-bold border flex items-center gap-1 ${
+                          ride.segmentType === 'somente_ida'
+                            ? 'bg-blue-50 text-blue-700 border-blue-200'
+                            : ride.segmentType === 'somente_volta'
+                            ? 'bg-purple-50 text-purple-700 border-purple-200'
+                            : 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                        }`}>
+                          {ride.segmentType === 'somente_ida' ? '➡️ Somente Ida' : ride.segmentType === 'somente_volta' ? '⬅️ Somente Volta' : '🔄 Ida e Volta'}
+                        </span>
+                        {(!ride.segmentType || ride.segmentType === 'ida_e_volta') && ride.returnTime && (
+                          <span className="text-[11px] text-slate-600 bg-slate-100 px-2 py-0.5 rounded-lg font-medium flex items-center gap-1">
+                            <Clock className="w-3 h-3 text-slate-500" />
+                            Retorno: <strong>{ride.returnTime}</strong>
+                          </span>
+                        )}
+                      </div>
+                      {(!ride.segmentType || ride.segmentType === 'ida_e_volta') && (
+                        <span className="text-[10px] text-indigo-700 bg-indigo-50 border border-indigo-100 px-2 py-0.5 rounded-md font-semibold">
+                          Permite trecho parcial (50%)
+                        </span>
+                      )}
+                    </div>
                   </div>
 
                   {/* Driver Pending Requests for Offers */}
@@ -1104,22 +1350,83 @@ export const RidesView: React.FC<RidesViewProps> = ({
                             <div className="flex items-center space-x-2.5">
                               <img src={req.userAvatar} alt={req.userName} className="w-8 h-8 rounded-full object-cover" />
                               <div>
-                                <p className="text-xs font-bold text-slate-900">{req.userName}</p>
+                                <div className="flex items-center space-x-1.5">
+                                  <p className="text-xs font-bold text-slate-900">{req.userName}</p>
+                                  {req.requestedSegmentType && (
+                                    <span className="text-[10px] font-bold text-indigo-700 bg-indigo-50 px-1.5 py-0.2 rounded border border-indigo-200">
+                                      {getSegmentLabel(req.requestedSegmentType)}
+                                    </span>
+                                  )}
+                                </div>
                                 <p className="text-[11px] text-slate-500 truncate max-w-[220px]">
                                   {req.meetingPoint.address}
                                 </p>
                               </div>
                             </div>
                             <div className="flex items-center space-x-2 shrink-0">
-                              <button
-                                onClick={() => onAcceptRequest(ride.id, req)}
-                                className="px-3.5 py-1.5 min-h-[38px] bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-lg transition active:scale-95 cursor-pointer"
-                              >
-                                Aceitar
-                              </button>
+                              {!canJoinRide(ride) ? (
+                                <span className="text-[11px] text-slate-400 italic">Viagem Encerrada</span>
+                              ) : (
+                                <button
+                                  onClick={() => {
+                                    if (!canJoinRide(ride)) {
+                                      alert('Esta carona pertence ao passado ou já foi concluída. Não é possível aceitar solicitações.');
+                                      return;
+                                    }
+                                    onAcceptRequest(ride.id, req);
+                                  }}
+                                  className="px-3.5 py-1.5 min-h-[38px] bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-lg transition active:scale-95 cursor-pointer"
+                                >
+                                  Aceitar
+                                </button>
+                              )}
                               <button
                                 onClick={() => onRejectRequest(ride.id, req.userId)}
                                 className="px-3 py-1.5 min-h-[38px] bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-lg transition active:scale-95 cursor-pointer"
+                              >
+                                Recusar
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Driver Pending Segment Change Requests */}
+                  {!isRequest && isDriver && (ride.segmentChangeRequests || []).length > 0 && (
+                    <div className="bg-purple-50/90 border border-purple-200 rounded-2xl p-3.5 space-y-2.5">
+                      <div className="flex items-center space-x-1.5 text-purple-900 font-bold text-xs">
+                        <RefreshCw className="w-4 h-4 text-purple-600" />
+                        <span>Solicitações de Troca de Trecho ({(ride.segmentChangeRequests || []).length}):</span>
+                      </div>
+                      <div className="space-y-2">
+                        {(ride.segmentChangeRequests || []).map((req) => (
+                          <div
+                            key={req.id}
+                            className="bg-white p-3 rounded-xl border border-purple-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5"
+                          >
+                            <div className="flex items-center space-x-2.5">
+                              <img src={req.userAvatar} alt={req.userName} className="w-8 h-8 rounded-full object-cover" />
+                              <div>
+                                <p className="text-xs font-bold text-slate-900">{req.userName}</p>
+                                <p className="text-[11px] text-slate-600">
+                                  Deseja alterar de <span className="font-semibold text-slate-800">{getSegmentLabel(req.currentSegmentType)}</span> para <span className="font-bold text-purple-700">{getSegmentLabel(req.requestedSegmentType)}</span>
+                                </p>
+                              </div>
+                            </div>
+                            <div className="flex items-center space-x-2 shrink-0">
+                              <button
+                                type="button"
+                                onClick={() => onRespondSegmentChange?.(ride.id, req.id, true)}
+                                className="px-3.5 py-1.5 min-h-[36px] bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-lg transition active:scale-95 cursor-pointer"
+                              >
+                                Aprovar Troca
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => onRespondSegmentChange?.(ride.id, req.id, false)}
+                                className="px-3 py-1.5 min-h-[36px] bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-lg transition active:scale-95 cursor-pointer"
                               >
                                 Recusar
                               </button>
@@ -1231,24 +1538,34 @@ export const RidesView: React.FC<RidesViewProps> = ({
                                   </div>
 
                                   {isPending && (
-                                    <div className="flex items-center space-x-1.5">
-                                      <button
-                                        id={`btn-accept-proposal-${proposal.id}`}
-                                        onClick={() => onAcceptProposal?.(ride.id, proposal.id)}
-                                        className="px-3.5 py-1.5 min-h-[36px] bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-lg transition active:scale-95 cursor-pointer flex items-center space-x-1 shadow-xs"
-                                      >
-                                        <Check className="w-3.5 h-3.5" />
-                                        <span>Aprovar & Entrar na Carona</span>
-                                      </button>
-                                      <button
-                                        id={`btn-reject-proposal-${proposal.id}`}
-                                        onClick={() => onRejectProposal?.(ride.id, proposal.id)}
-                                        className="px-2.5 py-1.5 min-h-[36px] bg-slate-100 hover:bg-slate-200 text-slate-600 hover:text-slate-900 text-xs font-bold rounded-lg transition active:scale-95 cursor-pointer"
-                                        title="Recusar proposta"
-                                      >
-                                        <X className="w-3.5 h-3.5" />
-                                      </button>
-                                    </div>
+                                    !canJoinRide(ride) ? (
+                                      <span className="text-[11px] text-slate-400 italic">Viagem Encerrada (Data Passada)</span>
+                                    ) : (
+                                      <div className="flex items-center space-x-1.5">
+                                        <button
+                                          id={`btn-accept-proposal-${proposal.id}`}
+                                          onClick={() => {
+                                            if (!canJoinRide(ride)) {
+                                              alert('Esta carona pertence ao passado ou já foi concluída/cancelada.');
+                                              return;
+                                            }
+                                            onAcceptProposal?.(ride.id, proposal.id);
+                                          }}
+                                          className="px-3.5 py-1.5 min-h-[36px] bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-lg transition active:scale-95 cursor-pointer flex items-center space-x-1 shadow-xs"
+                                        >
+                                          <Check className="w-3.5 h-3.5" />
+                                          <span>Aprovar & Entrar na Carona</span>
+                                        </button>
+                                        <button
+                                          id={`btn-reject-proposal-${proposal.id}`}
+                                          onClick={() => onRejectProposal?.(ride.id, proposal.id)}
+                                          className="px-2.5 py-1.5 min-h-[36px] bg-slate-100 hover:bg-slate-200 text-slate-600 hover:text-slate-900 text-xs font-bold rounded-lg transition active:scale-95 cursor-pointer"
+                                          title="Recusar proposta"
+                                        >
+                                          <X className="w-3.5 h-3.5" />
+                                        </button>
+                                      </div>
+                                    )
                                   )}
                                 </div>
                               </div>
@@ -1262,20 +1579,54 @@ export const RidesView: React.FC<RidesViewProps> = ({
                   {/* Accepted Passengers */}
                   {ride.acceptedPassengers.length > 0 && (
                     <div className="space-y-1.5">
-                      <span className="text-xs text-slate-500 font-medium flex items-center gap-1">
-                        <Users className="w-3.5 h-3.5 text-slate-400" />
-                        Passageiros Confirmados:
-                      </span>
+                      <div className="flex items-center justify-between text-xs text-slate-500 font-medium">
+                        <span className="flex items-center gap-1">
+                          <Users className="w-3.5 h-3.5 text-slate-400" />
+                          Passageiros Confirmados ({ride.acceptedPassengers.length}/{ride.totalSeats}):
+                        </span>
+                        {isDriver && ride.status === 'agendada' && canLeaveRide(ride) && (
+                          <span className="text-[10px] text-slate-400">
+                            Toque no <UserX className="w-2.5 h-2.5 inline text-rose-500" /> para excluir
+                          </span>
+                        )}
+                      </div>
                       <div className="flex items-center space-x-2 overflow-x-auto py-1">
-                        {ride.acceptedPassengers.map((p, idx) => (
-                          <div
-                            key={`${p.userId}-${idx}`}
-                            className="flex items-center space-x-1.5 bg-slate-100 px-3 py-1 rounded-full text-xs text-slate-800 shrink-0 font-medium"
-                          >
-                            <img src={p.userAvatar} alt={p.userName} className="w-4 h-4 rounded-full object-cover" />
-                            <span>{p.userName}</span>
-                          </div>
-                        ))}
+                        {ride.acceptedPassengers.map((p, idx) => {
+                          const pSegment = p.segmentType || ride.segmentType || 'ida_e_volta';
+                          const badge = getSegmentShortBadge(pSegment);
+                          return (
+                            <div
+                              key={`${p.userId}-${idx}`}
+                              className="flex items-center space-x-1.5 bg-slate-100 hover:bg-slate-200/80 px-3 py-1 rounded-full text-xs text-slate-800 shrink-0 font-medium transition"
+                            >
+                              <img src={p.userAvatar} alt={p.userName} className="w-4 h-4 rounded-full object-cover" />
+                              <span>{p.userName}</span>
+                              <span className={`text-[10px] px-1.5 py-0.2 rounded-md font-bold border ${badge.badgeClass}`}>
+                                {badge.icon} {badge.label}
+                                {p.agreedPrice !== undefined && ` (R$ ${p.agreedPrice.toFixed(2)})`}
+                              </span>
+                              {p.segmentChangePending && (
+                                <span className="text-[9px] px-1.5 py-0.2 rounded font-bold bg-amber-100 text-amber-800 border border-amber-300 animate-pulse">
+                                  Troca p/ {getSegmentLabel(p.segmentChangePending)}
+                                </span>
+                              )}
+                              {isDriver && ride.status === 'agendada' && canLeaveRide(ride) && (
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setPassengerToRemove({ ride, passenger: p });
+                                  }}
+                                  className="ml-1 p-0.5 text-slate-400 hover:text-rose-600 hover:bg-rose-100 rounded-full transition cursor-pointer"
+                                  title={`Excluir ${p.userName} da viagem com envio de justificativa por push e e-mail`}
+                                  aria-label={`Excluir ${p.userName} da viagem`}
+                                >
+                                  <UserX className="w-3.5 h-3.5 text-rose-500" />
+                                </button>
+                              )}
+                            </div>
+                          );
+                        })}
                       </div>
                     </div>
                   )}
@@ -1298,16 +1649,54 @@ export const RidesView: React.FC<RidesViewProps> = ({
                     </button>
 
                     {isDriver ? (
-                      <div className="flex items-center space-x-2 w-full sm:w-auto">
-                        {ride.status === 'agendada' && (
-                          <button
-                            id={`btn-start-ride-${ride.id}`}
-                            onClick={() => handleStartRideWithNavigation(ride)}
-                            className="w-full sm:w-auto px-5 py-2.5 min-h-[44px] bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-xl shadow-xs flex items-center justify-center space-x-2 transition active:scale-95 cursor-pointer"
-                          >
-                            <Play className="w-4 h-4" />
-                            <span>Iniciar Viagem & Navegação</span>
-                          </button>
+                      <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
+                        {ride.status === 'agendada' && canLeaveRide(ride) && (
+                          <>
+                            <button
+                              id={`btn-edit-ride-${ride.id}`}
+                              type="button"
+                              onClick={() => setEditingRide(ride)}
+                              className="w-full sm:w-auto px-3.5 py-2.5 min-h-[44px] text-slate-700 hover:text-slate-900 bg-slate-100 hover:bg-slate-200 border border-slate-300 text-xs font-bold rounded-xl shadow-xs flex items-center justify-center space-x-1.5 transition active:scale-95 cursor-pointer"
+                              title="Editar informações da viagem (destino, apelido, horários, vagas)"
+                            >
+                              <Pencil className="w-4 h-4 text-slate-600" />
+                              <span>Editar Viagem</span>
+                            </button>
+                            {onCancelRide && (
+                              <button
+                                id={`btn-cancel-ride-${ride.id}`}
+                                type="button"
+                                onClick={() => {
+                                  setRideToCancel(ride);
+                                  setCancelReason('');
+                                }}
+                                className="w-full sm:w-auto px-3.5 py-2.5 min-h-[44px] text-rose-700 hover:text-rose-800 bg-rose-50 hover:bg-rose-100 border border-rose-200 text-xs font-bold rounded-xl shadow-xs flex items-center justify-center space-x-1.5 transition active:scale-95 cursor-pointer"
+                                title="Cancelar e excluir viagem com aviso push e e-mail aos passageiros"
+                              >
+                                <XCircle className="w-4 h-4 text-rose-600" />
+                                <span>Cancelar Viagem</span>
+                              </button>
+                            )}
+                            {!isRequest && (
+                              <button
+                                id={`btn-start-ride-${ride.id}`}
+                                onClick={() => handleStartRideWithNavigation(ride)}
+                                className="w-full sm:w-auto px-5 py-2.5 min-h-[44px] bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-xl shadow-xs flex items-center justify-center space-x-2 transition active:scale-95 cursor-pointer"
+                              >
+                                <Play className="w-4 h-4" />
+                                <span>Iniciar Viagem & Navegação</span>
+                              </button>
+                            )}
+                            <button
+                              id={`btn-complete-ride-${ride.id}`}
+                              onClick={() => handleCompleteWithCelebration(ride.id)}
+                              className="w-full sm:w-auto px-4 py-2.5 min-h-[44px] bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 text-xs font-bold rounded-xl shadow-xs flex items-center justify-center space-x-1.5 transition active:scale-95 cursor-pointer"
+                              title="Concluir viagem e computar créditos"
+                            >
+                              <CheckCircle className="w-4 h-4 text-emerald-600" />
+                              <span>Concluir</span>
+                            </button>
+                          </>
                         )}
                         {ride.status === 'em_andamento' && (
                           <div className="flex items-center space-x-2 w-full sm:w-auto">
@@ -1342,10 +1731,51 @@ export const RidesView: React.FC<RidesViewProps> = ({
                               <span>Acompanhar Trajeto (GPS)</span>
                             </button>
                           ) : (
-                            <span className="w-full sm:w-auto min-h-[44px] text-xs bg-emerald-50 text-emerald-700 border border-emerald-200 px-3 py-2 rounded-xl font-bold flex items-center justify-center space-x-1.5">
-                              <CheckCircle className="w-4 h-4 text-emerald-600" />
-                              <span>Vaga Confirmada</span>
-                            </span>
+                            <div className="flex items-center space-x-2 w-full sm:w-auto flex-wrap gap-y-1">
+                              <span className="w-full sm:w-auto min-h-[44px] text-xs bg-emerald-50 text-emerald-700 border border-emerald-200 px-3 py-2 rounded-xl font-bold flex items-center justify-center space-x-1.5">
+                                <CheckCircle className="w-4 h-4 text-emerald-600" />
+                                <span>Vaga Confirmada</span>
+                                {(() => {
+                                  const myPass = ride.acceptedPassengers.find((p) => p.userId === currentUser?.id);
+                                  if (myPass?.segmentType) {
+                                    return (
+                                      <span className="ml-1 px-1.5 py-0.5 rounded text-[10px] bg-emerald-100 text-emerald-800 font-extrabold">
+                                        {getSegmentLabel(myPass.segmentType)}
+                                      </span>
+                                    );
+                                  }
+                                  return null;
+                                })()}
+                              </span>
+                              {currentUser && canLeaveRide(ride) && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    const myPass = ride.acceptedPassengers.find((p) => p.userId === currentUser.id);
+                                    if (myPass) setPassengerRideToEdit({ ride, passenger: myPass });
+                                  }}
+                                  className="text-xs text-indigo-700 hover:text-indigo-900 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 px-3 py-2 min-h-[44px] rounded-xl font-bold transition cursor-pointer flex items-center space-x-1.5 shadow-xs"
+                                  title="Editar informações da minha viagem: escolher trecho (ida e volta, só ida, só volta), ponto de embarque e observações"
+                                >
+                                  <Pencil className="w-3.5 h-3.5 text-indigo-600" />
+                                  <span>Editar Trecho / Viagem</span>
+                                </button>
+                              )}
+                              {onCancelReservation && currentUser && canLeaveRide(ride) && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    if (confirm('Deseja cancelar sua reserva nesta carona? Sua vaga será liberada para outros colegas.')) {
+                                      onCancelReservation(ride.id, currentUser.id);
+                                    }
+                                  }}
+                                  className="text-xs text-rose-600 hover:text-rose-800 hover:bg-rose-50 border border-rose-200 px-3 py-2 min-h-[44px] rounded-xl font-semibold transition cursor-pointer"
+                                  title="Liberar minha vaga"
+                                >
+                                  Cancelar Vaga
+                                </button>
+                              )}
+                            </div>
                           )
                         ) : (
                           <span className="w-full sm:w-auto min-h-[44px] text-xs bg-amber-50 text-amber-800 border border-amber-200 px-3 py-2 rounded-xl font-semibold flex items-center justify-center space-x-1.5">
@@ -1420,10 +1850,10 @@ export const RidesView: React.FC<RidesViewProps> = ({
                       ? 'bg-indigo-600 text-white shadow-2xs'
                       : 'bg-white text-slate-700 border border-slate-200 hover:bg-slate-100'
                   }`}
-                  title="Usar endereço cadastrado em seu perfil"
+                  title="Usar endereço padrão cadastrado em seu perfil"
                 >
                   <Home className="w-3.5 h-3.5" />
-                  <span>Residência</span>
+                  <span>Endereço Padrão</span>
                 </button>
               </div>
             </div>
@@ -1620,7 +2050,6 @@ export const RidesView: React.FC<RidesViewProps> = ({
                   onClick={() => {
                     setDateFilterMode('all_future');
                     setTimeFilterMode('all');
-                    setShowPastRides(false);
                   }}
                   className={`px-2.5 py-1 rounded-lg font-medium transition cursor-pointer ${
                     dateFilterMode === 'all_future' && timeFilterMode === 'all'
@@ -1681,7 +2110,7 @@ export const RidesView: React.FC<RidesViewProps> = ({
                   🌆 Tarde (12h-18h)
                 </button>
 
-                {(dateFilterMode !== 'all_future' || timeFilterMode !== 'all' || showPastRides) && (
+                {(dateFilterMode !== 'all_future' || timeFilterMode !== 'all') && (
                   <button
                     type="button"
                     onClick={() => {
@@ -1689,7 +2118,6 @@ export const RidesView: React.FC<RidesViewProps> = ({
                       setTimeFilterMode('all');
                       setCustomDate('');
                       setCustomTime('');
-                      setShowPastRides(false);
                     }}
                     className="px-2.5 py-1 rounded-lg text-rose-700 bg-rose-50 hover:bg-rose-100 font-bold transition flex items-center gap-1 cursor-pointer"
                   >
@@ -1699,16 +2127,11 @@ export const RidesView: React.FC<RidesViewProps> = ({
                 )}
               </div>
 
-              {/* Toggle to include past rides if user explicitly wants history search */}
-              <label className="flex items-center gap-1.5 text-xs text-slate-600 font-medium cursor-pointer hover:text-slate-900 select-none">
-                <input
-                  type="checkbox"
-                  checked={showPastRides}
-                  onChange={(e) => setShowPastRides(e.target.checked)}
-                  className="w-3.5 h-3.5 text-indigo-600 rounded border-slate-300 focus:ring-indigo-500"
-                />
-                <span>Incluir caronas com horário já passado</span>
-              </label>
+              {/* Informative indicator that search only returns future rides */}
+              <div className="flex items-center gap-1.5 text-xs text-emerald-700 font-medium select-none bg-emerald-50 border border-emerald-200/60 px-2.5 py-1 rounded-lg">
+                <Clock className="w-3.5 h-3.5 text-emerald-600" />
+                <span>Apenas viagens futuras ativas</span>
+              </div>
             </div>
           </div>
         </div>
@@ -1862,11 +2285,14 @@ export const RidesView: React.FC<RidesViewProps> = ({
               const isOffer = (ride.rideType || 'offer') === 'offer';
               const isDriver = currentUser ? ride.driverId === currentUser.id : false;
               const isGroupMember = currentUser ? (ride.visibility === 'group' && ride.targetGroupId && currentUser.groups.includes(ride.targetGroupId)) : false;
+              const targetGroup = ride.targetGroupId ? groups.find((g) => g.id === ride.targetGroupId) : null;
+              const isBlockedInGroup = Boolean(currentUser && targetGroup?.blockedMemberIds?.includes(currentUser.id));
+              const canAutoAccept = isGroupMember && !isBlockedInGroup;
               const isAccepted = currentUser ? ride.acceptedPassengers.some((p) => p.userId === currentUser.id) : false;
               const isPending = currentUser ? ride.pendingRequests.some((p) => p.userId === currentUser.id) : false;
               const isFull = ride.occupiedSeats >= ride.totalSeats;
 
-              const isRidePast = isRideInPast(ride);
+              const isRidePast = !canJoinRide(ride);
 
               return (
                 <div
@@ -1954,9 +2380,16 @@ export const RidesView: React.FC<RidesViewProps> = ({
 
                     <div className="flex items-start space-x-2.5">
                       <MapPin className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
-                      <div>
+                      <div className="min-w-0 flex-1">
                         <span className="text-slate-500 font-medium text-xs">Destino Final:</span>
-                        <p className="text-slate-900 font-semibold leading-snug">{ride.destination.address}</p>
+                        <p className="text-slate-900 font-semibold leading-snug break-words">
+                          {ride.destinationAlias || ride.destination.alias || ride.destination.name || ride.destination.address}
+                        </p>
+                        {(ride.destinationAlias || ride.destination.alias || ride.destination.name) && (
+                          <span className="text-[11px] text-slate-500 block truncate" title={ride.destination.address}>
+                            {ride.destination.address}
+                          </span>
+                        )}
                       </div>
                     </div>
 
@@ -1998,6 +2431,59 @@ export const RidesView: React.FC<RidesViewProps> = ({
                         </span>
                       </div>
                     </div>
+
+                    {/* Segment Badge & Return Time info */}
+                    <div className="flex items-center justify-between flex-wrap gap-2 pt-2 border-t border-slate-200/50">
+                      <div className="flex items-center space-x-1.5 flex-wrap gap-y-1">
+                        <span className={`px-2.5 py-0.5 rounded-lg text-[11px] font-bold border flex items-center gap-1 ${
+                          ride.segmentType === 'somente_ida'
+                            ? 'bg-blue-50 text-blue-700 border-blue-200'
+                            : ride.segmentType === 'somente_volta'
+                            ? 'bg-purple-50 text-purple-700 border-purple-200'
+                            : 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                        }`}>
+                          {ride.segmentType === 'somente_ida' ? '➡️ Somente Ida' : ride.segmentType === 'somente_volta' ? '⬅️ Somente Volta' : '🔄 Ida e Volta'}
+                        </span>
+                        {(!ride.segmentType || ride.segmentType === 'ida_e_volta') && ride.returnTime && (
+                          <span className="text-[11px] text-slate-600 bg-slate-100 px-2 py-0.5 rounded-lg font-medium flex items-center gap-1">
+                            <Clock className="w-3 h-3 text-slate-500" />
+                            Retorno: <strong>{ride.returnTime}</strong>
+                          </span>
+                        )}
+                      </div>
+                      {(!ride.segmentType || ride.segmentType === 'ida_e_volta') && (
+                        <span className="text-[10px] text-indigo-700 bg-indigo-50 border border-indigo-100 px-2 py-0.5 rounded-md font-semibold">
+                          Permite trecho parcial (50%)
+                        </span>
+                      )}
+                    </div>
+
+                    {/* Accepted Passengers in Search Card */}
+                    {ride.acceptedPassengers.length > 0 && (
+                      <div className="space-y-1.5 pt-2 border-t border-slate-100">
+                        <span className="text-[11px] text-slate-500 font-medium block">
+                          Passageiros Confirmados ({ride.acceptedPassengers.length}/{ride.totalSeats}):
+                        </span>
+                        <div className="flex items-center space-x-2 overflow-x-auto py-0.5">
+                          {ride.acceptedPassengers.map((p, idx) => {
+                            const pSegment = p.segmentType || ride.segmentType || 'ida_e_volta';
+                            const badge = getSegmentShortBadge(pSegment);
+                            return (
+                              <div
+                                key={`${p.userId}-${idx}`}
+                                className="flex items-center space-x-1.5 bg-slate-100 px-2.5 py-0.5 rounded-full text-[11px] text-slate-800 shrink-0 font-medium"
+                              >
+                                <img src={p.userAvatar} alt={p.userName} className="w-3.5 h-3.5 rounded-full object-cover" />
+                                <span>{p.userName}</span>
+                                <span className={`text-[9px] px-1 py-0.2 rounded font-bold border ${badge.badgeClass}`}>
+                                  {badge.icon} {badge.label}
+                                </span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
                   </div>
 
                   {/* Actions for Community Cards */}
@@ -2015,7 +2501,7 @@ export const RidesView: React.FC<RidesViewProps> = ({
 
                     {isRidePast ? (
                       <span className="px-4 py-2 min-h-[44px] bg-slate-100 text-slate-500 text-xs font-medium rounded-xl flex items-center justify-center">
-                        Horário de Saída já Ocorrido
+                        {ride.status === 'concluida' ? 'Viagem Concluída' : 'Viagem Encerrada (Data Passada)'}
                       </span>
                     ) : !currentUser ? (
                       <button
@@ -2027,18 +2513,63 @@ export const RidesView: React.FC<RidesViewProps> = ({
                         <span>🔒 Entrar para Aderir à Carona</span>
                       </button>
                     ) : isDriver ? (
-                      <span className="px-4 py-2 min-h-[44px] bg-slate-100 text-slate-600 text-xs font-bold rounded-xl flex items-center justify-center">
-                        Sua Publicação
-                      </span>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="px-3.5 py-2 min-h-[44px] bg-slate-100 text-slate-600 text-xs font-bold rounded-xl flex items-center justify-center">
+                          Sua Publicação
+                        </span>
+                        {canLeaveRide(ride) && (
+                          <button
+                            id={`btn-edit-public-ride-${ride.id}`}
+                            type="button"
+                            onClick={() => setEditingRide(ride)}
+                            className="px-3.5 py-2 min-h-[44px] bg-indigo-50 hover:bg-indigo-100 text-indigo-700 text-xs font-bold rounded-xl border border-indigo-200 flex items-center justify-center gap-1.5 transition active:scale-95 cursor-pointer shadow-xs"
+                            title="Editar informações desta viagem"
+                          >
+                            <Pencil className="w-3.5 h-3.5 text-indigo-600" />
+                            <span>Editar</span>
+                          </button>
+                        )}
+                      </div>
                     ) : isOffer ? (
                       <div>
                         {isAccepted ? (
-                          <span className="px-4 py-2 min-h-[44px] bg-emerald-50 text-emerald-700 text-xs font-bold rounded-xl flex items-center justify-center gap-1.5 border border-emerald-200">
-                            <Check className="w-4 h-4" /> Vaga Confirmada
-                          </span>
+                          <div className="flex items-center space-x-2 flex-wrap gap-y-1">
+                            <span className="px-3.5 py-2 min-h-[44px] bg-emerald-50 text-emerald-700 text-xs font-bold rounded-xl flex items-center justify-center gap-1.5 border border-emerald-200">
+                              <Check className="w-4 h-4" /> Vaga Confirmada
+                              {(() => {
+                                const myPass = ride.acceptedPassengers.find((p) => p.userId === currentUser?.id);
+                                if (myPass?.segmentType) {
+                                  return (
+                                    <span className="ml-1 px-1.5 py-0.5 rounded text-[10px] bg-emerald-100 text-emerald-800 font-extrabold">
+                                      {getSegmentLabel(myPass.segmentType)}
+                                    </span>
+                                  );
+                                }
+                                return null;
+                              })()}
+                            </span>
+                            {canLeaveRide(ride) && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  const myPass = ride.acceptedPassengers.find((p) => p.userId === currentUser.id);
+                                  if (myPass) setPassengerRideToEdit({ ride, passenger: myPass });
+                                }}
+                                className="px-3 py-2 min-h-[44px] bg-indigo-50 hover:bg-indigo-100 text-indigo-700 text-xs font-bold rounded-xl border border-indigo-200 flex items-center justify-center gap-1.5 transition active:scale-95 cursor-pointer shadow-xs"
+                                title="Editar minha viagem: escolher trecho (ida e volta, só ida, só volta), ponto de encontro e observações"
+                              >
+                                <Pencil className="w-3.5 h-3.5 text-indigo-600" />
+                                <span>Editar Trecho / Viagem</span>
+                              </button>
+                            )}
+                          </div>
                         ) : isPending ? (
                           <span className="px-4 py-2 min-h-[44px] bg-amber-50 text-amber-800 text-xs font-bold rounded-xl flex items-center justify-center border border-amber-200">
                             Solicitação Enviada
+                          </span>
+                        ) : !canJoinRide(ride) ? (
+                          <span className="px-4 py-2 min-h-[44px] bg-slate-100 text-slate-500 text-xs font-semibold rounded-xl flex items-center justify-center border border-slate-200">
+                            {ride.status === 'concluida' ? 'Viagem Concluída' : 'Viagem Encerrada (Data Passada)'}
                           </span>
                         ) : isFull ? (
                           <span className="px-4 py-2 min-h-[44px] bg-slate-100 text-slate-500 text-xs font-medium rounded-xl flex items-center justify-center">
@@ -2057,14 +2588,32 @@ export const RidesView: React.FC<RidesViewProps> = ({
                         ) : (
                           <button
                             id={`btn-community-join-${ride.id}`}
-                            onClick={() => onJoinRide(ride.id, isGroupMember)}
-                            className="w-full sm:w-auto px-5 py-2.5 min-h-[44px] bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-xl shadow-xs transition active:scale-95 cursor-pointer flex items-center justify-center space-x-1.5"
+                            onClick={() => {
+                              if (!canJoinRide(ride)) {
+                                alert('Esta carona pertence ao passado ou já foi concluída. Não é permitido aderir a viagens passadas.');
+                                return;
+                              }
+                              setRideForJoinSegment({ ride, canAutoAccept });
+                            }}
+                            className={`w-full sm:w-auto px-5 py-2.5 min-h-[44px] text-white text-xs font-bold rounded-xl shadow-xs transition active:scale-95 cursor-pointer flex items-center justify-center space-x-1.5 ${
+                              isBlockedInGroup
+                                ? 'bg-amber-600 hover:bg-amber-700'
+                                : 'bg-indigo-600 hover:bg-indigo-700'
+                            }`}
+                            title={isBlockedInGroup ? 'Adesão automática pausada no grupo. Sua vaga dependerá de aprovação manual do motorista.' : undefined}
                           >
                             {ride.targetGroupId ? (
-                              <>
-                                <Sparkles className="w-4 h-4 text-amber-300" />
-                                <span>Confirmar Vaga (Membro)</span>
-                              </>
+                              isBlockedInGroup ? (
+                                <>
+                                  <Users className="w-4 h-4 text-amber-200" />
+                                  <span>Solicitar Vaga (Sob Aprovação)</span>
+                                </>
+                              ) : (
+                                <>
+                                  <Sparkles className="w-4 h-4 text-amber-300" />
+                                  <span>Confirmar Vaga (Membro)</span>
+                                </>
+                              )
                             ) : (
                               <>
                                 <Users className="w-4 h-4" />
@@ -2074,6 +2623,10 @@ export const RidesView: React.FC<RidesViewProps> = ({
                           </button>
                         )}
                       </div>
+                    ) : !canJoinRide(ride) ? (
+                      <span className="px-4 py-2 min-h-[44px] bg-slate-100 text-slate-500 text-xs font-semibold rounded-xl flex items-center justify-center border border-slate-200">
+                        {ride.status === 'concluida' ? 'Pedido Concluído' : 'Pedido Encerrado (Data Passada)'}
+                      </span>
                     ) : (
                       <button
                         id={`btn-community-welcome-${ride.id}`}
@@ -2189,6 +2742,137 @@ export const RidesView: React.FC<RidesViewProps> = ({
               </button>
             </div>
 
+            {/* PAINEL DE PREENCHIMENTO RÁPIDO: ROTINA FIXA & TRAJETOS */}
+            <div className="bg-gradient-to-br from-indigo-50/90 via-purple-50/50 to-emerald-50/40 border border-indigo-200/90 rounded-2xl p-4 space-y-3 shadow-2xs animate-in fade-in">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-indigo-100/90 pb-2.5">
+                <div className="flex items-center space-x-2.5">
+                  <div className="w-8 h-8 rounded-xl bg-gradient-to-tr from-indigo-600 to-purple-600 text-white flex items-center justify-center shadow-xs shrink-0">
+                    <Zap className="w-4 h-4 text-amber-300" />
+                  </div>
+                  <div>
+                    <h4 className="font-display font-bold text-slate-900 text-xs sm:text-sm flex items-center gap-1.5 flex-wrap">
+                      <span>Preenchimento Rápido com Rotina Fixa & Trajetos</span>
+                      <span className="text-[10px] font-bold text-indigo-700 bg-indigo-100 px-2 py-0.5 rounded-full border border-indigo-200">
+                        1-Clique
+                      </span>
+                    </h4>
+                    <p className="text-[11px] text-slate-600">
+                      Carregue instantaneamente seus percursos habituais, horários, vagas e rateios configurados no seu perfil.
+                    </p>
+                  </div>
+                </div>
+
+                {onNavigateToTab && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowModal(false);
+                      onNavigateToTab('routines');
+                    }}
+                    className="text-[11px] font-bold text-indigo-700 hover:text-indigo-900 bg-white/90 hover:bg-white px-2.5 py-1.5 rounded-lg border border-indigo-200 flex items-center gap-1 transition self-start sm:self-auto cursor-pointer shadow-2xs shrink-0"
+                    title="Configurar ou editar sua rotina fixa e ponto de encontro"
+                  >
+                    <Repeat className="w-3 h-3 text-indigo-600" />
+                    <span>Configurar Rotinas</span>
+                  </button>
+                )}
+              </div>
+
+              {/* Resumo da Rotina Salva */}
+              <div className="bg-white/95 border border-indigo-100 rounded-xl p-3 space-y-2.5">
+                <div className="flex items-center justify-between flex-wrap gap-2 text-xs">
+                  <span className="font-bold text-indigo-950 flex items-center gap-1.5">
+                    <BookmarkCheck className="w-4 h-4 text-emerald-600 shrink-0" />
+                    <span>{userRoutine?.title || 'Rotina Habitual Diária'}</span>
+                  </span>
+
+                  {isTodayRoutineDay && (
+                    <span className="text-[10px] font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-md border border-emerald-200 flex items-center gap-1">
+                      <Calendar className="w-3 h-3" />
+                      <span>Hoje é dia da sua rotina ({todayDayName})!</span>
+                    </span>
+                  )}
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px] text-slate-600">
+                  <div className="flex items-start gap-1.5 min-w-0">
+                    <MapPin className="w-3.5 h-3.5 text-emerald-600 shrink-0 mt-0.5" />
+                    <p className="truncate" title={routineOrigin.address}>
+                      <strong className="text-slate-800">Partida:</strong> {routineOrigin.address}
+                    </p>
+                  </div>
+                  <div className="flex items-start gap-1.5 min-w-0">
+                    <MapPin className="w-3.5 h-3.5 text-indigo-600 shrink-0 mt-0.5" />
+                    <p className="truncate" title={routineDest.address}>
+                      <strong className="text-slate-800">Destino:</strong> {routineDest.alias ? `${routineDest.alias} (${routineDest.address})` : routineDest.address}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-3 flex-wrap text-[11px] text-slate-500 pt-1.5 border-t border-slate-100 font-mono">
+                  <span className="flex items-center gap-1">
+                    <Clock className="w-3 h-3 text-indigo-600" />
+                    <span>Saída: <strong className="text-slate-700">{userRoutine?.departureTime || '07:30'}</strong></span>
+                  </span>
+                  <span className="flex items-center gap-1">
+                    <Users className="w-3 h-3 text-indigo-600" />
+                    <span>Vagas: <strong className="text-slate-700">{userRoutine?.defaultSeats || primaryVehicle?.availableSeats || 3}</strong></span>
+                  </span>
+                  <span className="flex items-center gap-1">
+                    <Coins className="w-3 h-3 text-indigo-600" />
+                    <span>Rateio: <strong className="text-slate-700">R$ {(userRoutine?.defaultPrice ?? 6.5).toFixed(2)}</strong></span>
+                  </span>
+                  {userRoutine?.daysOfWeek && userRoutine.daysOfWeek.length > 0 && (
+                    <span className="flex items-center gap-1 font-sans">
+                      <CalendarDays className="w-3 h-3 text-indigo-600" />
+                      <span>Dias: {userRoutine.daysOfWeek.join(', ')}</span>
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              {/* Botões de Ação de 1 Clique */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 pt-0.5">
+                <button
+                  type="button"
+                  onClick={() => handleApplyRoutine('outbound')}
+                  className="p-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold transition active:scale-95 shadow-xs flex items-center justify-center gap-1.5 cursor-pointer"
+                  title="Preencher o formulário com o trajeto de ida da rotina habitual"
+                >
+                  <Zap className="w-4 h-4 text-amber-300 shrink-0" />
+                  <span>⚡ Preencher Ida Habitual</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => handleApplyRoutine('return')}
+                  className="p-2.5 bg-white hover:bg-purple-50 text-purple-950 border border-purple-200 rounded-xl text-xs font-bold transition active:scale-95 flex items-center justify-center gap-1.5 cursor-pointer shadow-2xs"
+                  title="Inverter trajeto: usar o destino habitual como partida e residência/origem como chegada"
+                >
+                  <ArrowLeftRight className="w-4 h-4 text-purple-600 shrink-0" />
+                  <span>🔄 Volta (Retorno Invertido)</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => handleApplyRoutine('meeting')}
+                  className="p-2.5 bg-white hover:bg-amber-50 text-amber-950 border border-amber-200 rounded-xl text-xs font-bold transition active:scale-95 flex items-center justify-center gap-1.5 cursor-pointer shadow-2xs"
+                  title="Usar ponto de encontro configurado no perfil como local de partida"
+                >
+                  <MapPin className="w-4 h-4 text-amber-600 shrink-0" />
+                  <span>📍 Ponto de Encontro</span>
+                </button>
+              </div>
+
+              {/* Feedback Toast */}
+              {appliedRoutineFeedback && (
+                <div className="bg-emerald-50 border border-emerald-300 text-emerald-900 px-3 py-2 rounded-xl text-xs font-bold flex items-center gap-2 animate-in fade-in slide-in-from-top-1">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                  <span>{appliedRoutineFeedback}</span>
+                </div>
+              )}
+            </div>
+
             {/* Modalidade do Vínculo: Carona Avulsa vs Grupo */}
             <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-2xl space-y-3">
               <div className="flex items-center justify-between">
@@ -2239,6 +2923,7 @@ export const RidesView: React.FC<RidesViewProps> = ({
                         destAddress: firstGrp.defaultDestination?.address || prev.destAddress,
                         destLat: firstGrp.defaultDestination?.lat || prev.destLat,
                         destLng: firstGrp.defaultDestination?.lng || prev.destLng,
+                        destAlias: firstGrp.defaultDestination?.alias || firstGrp.name || prev.destAlias,
                         price: firstGrp.defaultPrice ?? prev.price,
                         departureTime: firstGrp.defaultDepartureTime || prev.departureTime,
                         visibility: 'group',
@@ -2280,6 +2965,7 @@ export const RidesView: React.FC<RidesViewProps> = ({
                             destAddress: found.defaultDestination?.address || prev.destAddress,
                             destLat: found.defaultDestination?.lat || prev.destLat,
                             destLng: found.defaultDestination?.lng || prev.destLng,
+                            destAlias: found.defaultDestination?.alias || found.name || prev.destAlias,
                             price: found.defaultPrice ?? prev.price,
                             departureTime: found.defaultDepartureTime || prev.departureTime,
                           }));
@@ -2398,6 +3084,15 @@ export const RidesView: React.FC<RidesViewProps> = ({
                   <div className="flex items-center gap-1.5 flex-wrap">
                     <button
                       type="button"
+                      onClick={handleSetFormOriginRoutine}
+                      className="text-purple-700 hover:text-purple-900 font-bold flex items-center gap-1 px-3 py-1.5 min-h-[36px] bg-purple-50 hover:bg-purple-100 rounded-lg transition cursor-pointer text-xs"
+                      title="Usar endereço de partida da rotina fixa cadastrada"
+                    >
+                      <Repeat className="w-3.5 h-3.5" />
+                      <span>Da Rotina</span>
+                    </button>
+                    <button
+                      type="button"
                       onClick={handleSetFormOriginResidential}
                       className="text-indigo-700 hover:text-indigo-900 font-bold flex items-center gap-1 px-3 py-1.5 min-h-[36px] bg-indigo-50 hover:bg-indigo-100 rounded-lg transition cursor-pointer text-xs"
                       title="Usar endereço cadastrado"
@@ -2454,6 +3149,15 @@ export const RidesView: React.FC<RidesViewProps> = ({
                   <div className="flex items-center gap-1.5 flex-wrap">
                     <button
                       type="button"
+                      onClick={handleSetFormDestRoutine}
+                      className="text-purple-700 hover:text-purple-900 font-bold flex items-center gap-1 px-3 py-1.5 min-h-[36px] bg-purple-50 hover:bg-purple-100 rounded-lg transition cursor-pointer text-xs"
+                      title="Usar endereço de destino da rotina fixa cadastrada"
+                    >
+                      <Repeat className="w-3.5 h-3.5" />
+                      <span>Da Rotina</span>
+                    </button>
+                    <button
+                      type="button"
                       onClick={() => setMapPickerTarget('formDest')}
                       className="text-indigo-700 hover:text-indigo-900 font-bold flex items-center gap-1 px-3 py-1.5 min-h-[36px] bg-slate-100 hover:bg-slate-200 rounded-lg transition cursor-pointer border border-slate-200 text-xs"
                     >
@@ -2468,16 +3172,54 @@ export const RidesView: React.FC<RidesViewProps> = ({
                     required
                     value={formData.destAddress}
                     onChange={(e) => setFormData({ ...formData, destAddress: e.target.value })}
-                    placeholder="Ex: Av. Prof. Luciano Gualberto, 380 - Butantã (USP Poli)"
+                    placeholder="Ex: Av. Prof. Luciano Gualberto, 380 - Butantã, São Paulo"
                     className="w-full bg-white border border-slate-300 rounded-xl px-4 py-3 pr-12 text-slate-900 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-600 font-medium"
                   />
                   <button
                     type="button"
                     onClick={() => setMapPickerTarget('formDest')}
-                    className="absolute right-2 top-2 bottom-2 px-2 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition flex items-center justify-center"
+                    className="absolute right-2 top-2 bottom-2 px-2 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition flex items-center justify-center cursor-pointer"
+                    title="Selecionar no mapa interativo"
                   >
                     <MapPin className="w-5 h-5 text-indigo-600" />
                   </button>
+                </div>
+              </div>
+
+              {/* CAMPO DE ALIAS PARA O PONTO DE DESTINO (EMPRESA OU FACULDADE) */}
+              <div className="p-3.5 bg-gradient-to-br from-indigo-50/70 to-purple-50/50 border border-indigo-200/80 rounded-2xl space-y-2">
+                <div className="flex items-center justify-between flex-wrap gap-1">
+                  <label className="block text-slate-900 font-bold text-sm sm:text-xs flex items-center gap-1.5">
+                    <Building2 className="w-4 h-4 text-indigo-600" />
+                    <span>Nome da Empresa ou Faculdade (Apelido do Destino):</span>
+                  </label>
+                  <span className="text-[10px] font-bold text-indigo-700 bg-indigo-100/90 px-2 py-0.5 rounded-md border border-indigo-200">
+                    Exibido nos Cards
+                  </span>
+                </div>
+
+                <input
+                  id="input-create-dest-alias"
+                  type="text"
+                  value={formData.destAlias}
+                  onChange={(e) => setFormData({ ...formData, destAlias: e.target.value })}
+                  placeholder="Ex: USP - Poli, Stefanini, Ambev Itaim, Unicamp, FIAP, etc."
+                  className="w-full bg-white border border-indigo-300/80 rounded-xl px-4 py-2.5 text-slate-900 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-600 font-medium placeholder-slate-400"
+                />
+
+                <div className="flex items-center justify-between flex-wrap gap-2 text-[11px] text-slate-600">
+                  <p>
+                    Preencha com o nome da empresa ou faculdade. Esse nome será exibido nos cards no lugar do endereço completo.
+                  </p>
+                  {currentUser?.institutionName && formData.destAlias !== currentUser.institutionName && (
+                    <button
+                      type="button"
+                      onClick={() => setFormData({ ...formData, destAlias: currentUser.institutionName! })}
+                      className="text-indigo-700 hover:text-indigo-900 font-bold underline cursor-pointer"
+                    >
+                      Usar minha instituição ({currentUser.institutionName})
+                    </button>
+                  )}
                 </div>
               </div>
 
@@ -2495,7 +3237,19 @@ export const RidesView: React.FC<RidesViewProps> = ({
                   />
                 </div>
                 <div>
-                  <label className="block text-slate-800 font-bold mb-1 text-sm sm:text-xs">Horário de Saída:</label>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="block text-slate-800 font-bold text-sm sm:text-xs">Horário de Saída:</label>
+                    {userRoutine?.departureTime && formData.departureTime !== userRoutine.departureTime && (
+                      <button
+                        type="button"
+                        onClick={() => setFormData({ ...formData, departureTime: userRoutine.departureTime })}
+                        className="text-[10px] font-bold text-indigo-700 hover:text-indigo-900 bg-indigo-50 hover:bg-indigo-100 px-2 py-0.5 rounded border border-indigo-200 transition cursor-pointer"
+                        title="Usar horário habitual da rotina fixa"
+                      >
+                        Usar {userRoutine.departureTime} da rotina
+                      </button>
+                    )}
+                  </div>
                   <input
                     type="time"
                     required
@@ -2504,6 +3258,76 @@ export const RidesView: React.FC<RidesViewProps> = ({
                     className="w-full bg-white border border-slate-300 rounded-xl px-4 py-3 text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 font-mono font-bold text-sm"
                   />
                 </div>
+              </div>
+
+              {/* Segmentação da Viagem (Trecho: Ida e Volta, Somente Ida, Somente Volta) */}
+              <div className="bg-slate-50 p-4 rounded-2xl border border-slate-200/90 space-y-3">
+                <div>
+                  <div className="flex items-center justify-between mb-1.5">
+                    <label className="block text-slate-800 font-bold text-sm sm:text-xs">
+                      Modalidade do Trecho:
+                    </label>
+                    <span className="text-[10px] font-bold text-indigo-700 bg-indigo-50 border border-indigo-200 px-2 py-0.5 rounded-full">
+                      Segmentação por Trecho
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-3 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setFormData({ ...formData, segmentType: 'ida_e_volta' })}
+                      className={`py-2.5 px-2 rounded-xl border text-xs font-bold transition flex items-center justify-center space-x-1.5 cursor-pointer ${
+                        formData.segmentType === 'ida_e_volta'
+                          ? 'bg-indigo-600 text-white border-indigo-600 shadow-xs'
+                          : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-100'
+                      }`}
+                    >
+                      <RefreshCw className="w-3.5 h-3.5" />
+                      <span>Ida e Volta</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setFormData({ ...formData, segmentType: 'somente_ida' })}
+                      className={`py-2.5 px-2 rounded-xl border text-xs font-bold transition flex items-center justify-center space-x-1.5 cursor-pointer ${
+                        formData.segmentType === 'somente_ida'
+                          ? 'bg-indigo-600 text-white border-indigo-600 shadow-xs'
+                          : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-100'
+                      }`}
+                    >
+                      <ArrowRight className="w-3.5 h-3.5" />
+                      <span>Somente Ida</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setFormData({ ...formData, segmentType: 'somente_volta' })}
+                      className={`py-2.5 px-2 rounded-xl border text-xs font-bold transition flex items-center justify-center space-x-1.5 cursor-pointer ${
+                        formData.segmentType === 'somente_volta'
+                          ? 'bg-indigo-600 text-white border-indigo-600 shadow-xs'
+                          : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-100'
+                      }`}
+                    >
+                      <ArrowLeft className="w-3.5 h-3.5" />
+                      <span>Somente Volta</span>
+                    </button>
+                  </div>
+                </div>
+
+                {formData.segmentType === 'ida_e_volta' && (
+                  <div className="pt-2 border-t border-slate-200">
+                    <label className="block text-slate-800 font-bold mb-1 text-xs flex items-center gap-1">
+                      <Clock className="w-3.5 h-3.5 text-indigo-600" />
+                      <span>Horário Previsto de Retorno (Volta):</span>
+                    </label>
+                    <input
+                      type="time"
+                      value={formData.returnTime}
+                      onChange={(e) => setFormData({ ...formData, returnTime: e.target.value })}
+                      className="w-full sm:w-1/2 bg-white border border-slate-300 rounded-xl px-4 py-2.5 text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 font-mono font-bold text-sm"
+                    />
+                    <p className="text-[11px] text-slate-500 mt-1">
+                      Passageiros poderão solicitar vaga para a viagem completa ou apenas um dos trechos (ida ou volta com rateio proporcional a 50%).
+                    </p>
+                  </div>
+                )}
               </div>
 
               {/* Vagas e Preço */}
@@ -2698,6 +3522,7 @@ export const RidesView: React.FC<RidesViewProps> = ({
         initialLng={
           mapPickerTarget === 'formOrigin' ? formData.originLng : formData.destLng
         }
+        currentUser={currentUser}
         onSelectLocation={(selected) => {
           if (mapPickerTarget === 'formOrigin') {
             setFormData((prev) => ({
@@ -2749,6 +3574,10 @@ export const RidesView: React.FC<RidesViewProps> = ({
         ride={selectedRideForNavigationModal}
         onClose={() => setSelectedRideForNavigationModal(null)}
         currentUser={currentUser}
+        onStartRide={(rideId) => {
+          onStartRide(rideId);
+          setSelectedRideForNavigationModal((prev) => (prev ? { ...prev, status: 'em_andamento' } : null));
+        }}
         onCompleteRide={(rideId) => {
           handleCompleteWithCelebration(rideId);
           setSelectedRideForNavigationModal(null);
@@ -2762,6 +3591,197 @@ export const RidesView: React.FC<RidesViewProps> = ({
         currentUser={currentUser}
         onClose={() => setSelectedRideForPassengerTrackingModal(null)}
       />
+
+      {/* Cancellation Confirmation & Passenger Notification Modal */}
+      {rideToCancel && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-lg w-full p-6 shadow-2xl border border-slate-200 animate-in fade-in zoom-in duration-200">
+            <div className="flex items-start justify-between gap-3 mb-4">
+              <div className="flex items-center space-x-3">
+                <div className="w-10 h-10 rounded-xl bg-rose-100 flex items-center justify-center text-rose-600 shrink-0">
+                  <XCircle className="w-6 h-6" />
+                </div>
+                <div>
+                  <h3 className="text-base font-black text-slate-900">Cancelar e Excluir Viagem</h3>
+                  <p className="text-xs text-slate-500">Confirme a exclusão e o disparo dos avisos</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setRideToCancel(null)}
+                className="p-1 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="space-y-4">
+              {/* Ride Summary */}
+              <div className="p-3.5 bg-slate-50 rounded-xl border border-slate-200/80 text-xs space-y-1.5">
+                <div className="flex items-center justify-between text-slate-700 font-semibold">
+                  <span>Trajeto:</span>
+                  <span className="text-slate-900 font-bold">{rideToCancel.origin.address.split(',')[0]} ➔ {rideToCancel.destination.address.split(',')[0]}</span>
+                </div>
+                <div className="flex items-center justify-between text-slate-600">
+                  <span>Data & Horário:</span>
+                  <span>{rideToCancel.departureDate || 'Hoje'} às {rideToCancel.departureTime}</span>
+                </div>
+                <div className="flex items-center justify-between text-slate-600">
+                  <span>Passageiros Confirmados:</span>
+                  <span className="font-bold text-indigo-700">{(rideToCancel.acceptedPassengers || []).length} passageiro(s)</span>
+                </div>
+              </div>
+
+              {/* Passenger Alert Notice */}
+              <div className="p-3.5 bg-rose-50 border border-rose-200 rounded-xl text-xs space-y-1.5 text-rose-800">
+                <div className="font-bold flex items-center space-x-1.5 text-rose-900">
+                  <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+                  <span>Aviso Automático aos Passageiros</span>
+                </div>
+                <p className="text-[11px] leading-relaxed text-rose-700">
+                  {(rideToCancel.acceptedPassengers || []).length > 0
+                    ? `Todos os ${(rideToCancel.acceptedPassengers || []).length} passageiro(s) com assento reservado receberão uma notificação Push instantânea e um e-mail com os detalhes do cancelamento.`
+                    : 'Nenhum passageiro estava com assento reservado no momento.'}
+                </p>
+              </div>
+
+              {/* Optional Reason Input */}
+              <div className="space-y-1.5">
+                <label className="text-xs font-bold text-slate-700 block">
+                  Motivo do cancelamento (opcional, enviado no Push e E-mail):
+                </label>
+                <textarea
+                  value={cancelReason}
+                  onChange={(e) => setCancelReason(e.target.value)}
+                  placeholder="Ex: Tive um imprevisto de saúde / Alteração de turno..."
+                  rows={3}
+                  className="w-full text-xs p-3 rounded-xl border border-slate-200 focus:outline-hidden focus:ring-2 focus:ring-rose-500 bg-slate-50/50 resize-none"
+                />
+              </div>
+
+              {/* Buttons */}
+              <div className="flex items-center justify-end space-x-3 pt-2">
+                <button
+                  type="button"
+                  disabled={isCanceling}
+                  onClick={() => setRideToCancel(null)}
+                  className="px-4 py-2.5 text-xs font-bold text-slate-600 hover:text-slate-800 hover:bg-slate-100 rounded-xl transition cursor-pointer disabled:opacity-50"
+                >
+                  Voltar
+                </button>
+                <button
+                  type="button"
+                  disabled={isCanceling}
+                  onClick={async () => {
+                    if (!onCancelRide) return;
+                    setIsCanceling(true);
+                    try {
+                      await onCancelRide(rideToCancel.id, cancelReason.trim() || undefined);
+                      setRideToCancel(null);
+                    } catch (e) {
+                      console.error('Erro ao cancelar:', e);
+                    } finally {
+                      setIsCanceling(false);
+                    }
+                  }}
+                  className="px-5 py-2.5 bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold rounded-xl shadow-xs flex items-center space-x-2 transition active:scale-95 cursor-pointer disabled:opacity-50"
+                >
+                  {isCanceling ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      <span>Cancelando & Notificando...</span>
+                    </>
+                  ) : (
+                    <>
+                      <XCircle className="w-4 h-4" />
+                      <span>Confirmar Cancelamento & Notificar</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal de Edição da Viagem (Modo Avançado: Criador pode modificar informações) */}
+      {editingRide && (
+        <EditRideModal
+          ride={editingRide}
+          currentUser={currentUser}
+          groups={groups}
+          isOpen={Boolean(editingRide)}
+          onClose={() => setEditingRide(null)}
+          onSave={async (rideId, updates) => {
+            if (onUpdateRide) {
+              await onUpdateRide(rideId, updates);
+            }
+          }}
+        />
+      )}
+
+      {/* Modal de Exclusão de Passageiro pelo Motorista (com Justificativa, Push e E-mail) */}
+      <RemovePassengerModal
+        isOpen={Boolean(passengerToRemove)}
+        onClose={() => setPassengerToRemove(null)}
+        ride={passengerToRemove?.ride || null}
+        passenger={passengerToRemove?.passenger || null}
+        passengerUser={
+          passengerToRemove?.passenger && allUsers
+            ? allUsers.find((u) => u.id === passengerToRemove.passenger.userId)
+            : null
+        }
+        onConfirmRemove={async (rideId, passengerUserId, justification) => {
+          if (onRemovePassenger) {
+            await onRemovePassenger(rideId, passengerUserId, justification);
+          }
+        }}
+      />
+
+      {/* Modal de Escolha de Trecho para Aderir / Solicitar Vaga */}
+      {rideForJoinSegment && (
+        <JoinRideSegmentModal
+          ride={rideForJoinSegment.ride}
+          isOpen={Boolean(rideForJoinSegment)}
+          canAutoAccept={rideForJoinSegment.canAutoAccept}
+          onClose={() => setRideForJoinSegment(null)}
+          onConfirm={(chosenSegment) => {
+            onJoinRide(rideForJoinSegment.ride.id, rideForJoinSegment.canAutoAccept, chosenSegment);
+            setRideForJoinSegment(null);
+          }}
+        />
+      )}
+
+      {/* Modal de Solicitação de Alteração de Trecho pelo Passageiro Confirmado */}
+      {rideForSegmentChange && (
+        <RequestSegmentChangeModal
+          ride={rideForSegmentChange.ride}
+          passenger={rideForSegmentChange.passenger}
+          isOpen={Boolean(rideForSegmentChange)}
+          onClose={() => setRideForSegmentChange(null)}
+          onSubmit={(requestedSegment) => {
+            onRequestSegmentChange?.(rideForSegmentChange.ride.id, requestedSegment);
+            setRideForSegmentChange(null);
+          }}
+        />
+      )}
+
+      {/* Modal de Edição de Viagem pelo Passageiro (Opção de Trecho: Ida e Volta / Só Ida / Só Volta, Ponto de Encontro e Notas) */}
+      {passengerRideToEdit && (
+        <PassengerEditRideModal
+          ride={passengerRideToEdit.ride}
+          passenger={passengerRideToEdit.passenger}
+          currentUser={currentUser}
+          isOpen={Boolean(passengerRideToEdit)}
+          onClose={() => setPassengerRideToEdit(null)}
+          onSave={async (rideId, updates) => {
+            if (onUpdatePassengerParticipation) {
+              await onUpdatePassengerParticipation(rideId, updates);
+            }
+            setPassengerRideToEdit(null);
+          }}
+        />
+      )}
     </div>
   );
 };

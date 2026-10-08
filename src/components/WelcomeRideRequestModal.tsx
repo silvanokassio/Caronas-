@@ -17,6 +17,7 @@ import {
 } from 'lucide-react';
 import { Ride, User, getUserVehicles, Vehicle, GeoLocation } from '../types';
 import { calculateDistanceKm } from '../lib/geo';
+import { isRideInPast, canJoinRide } from '../lib/dateUtils';
 
 interface WelcomeRideRequestModalProps {
   ride: Ride;
@@ -57,7 +58,7 @@ export const WelcomeRideRequestModal: React.FC<WelcomeRideRequestModalProps> = (
   const driverScheduledRides = useMemo(() => {
     if (!currentUser) return [];
     return rides
-      .filter((r) => (r.rideType || 'offer') === 'offer' && r.driverId === currentUser.id && r.status === 'agendada')
+      .filter((r) => (r.rideType || 'offer') === 'offer' && r.driverId === currentUser.id && r.status === 'agendada' && !isRideInPast(r))
       .map((driverRide) => {
         const destDist = calculateDistanceKm(
           driverRide.destination.lat,
@@ -125,6 +126,11 @@ export const WelcomeRideRequestModal: React.FC<WelcomeRideRequestModalProps> = (
     e.preventDefault();
     if (!currentUser) {
       onOpenAuth?.('login');
+      return;
+    }
+
+    if (!canJoinRide(ride)) {
+      alert('Este pedido de carona pertence ao passado ou já foi concluído/cancelado.');
       return;
     }
 

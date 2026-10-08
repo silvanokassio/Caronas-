@@ -3,6 +3,7 @@ export interface GeoLocation {
   lng: number;
   address: string;
   name?: string;
+  alias?: string; // Apelido ou nome do destino (ex: faculdade ou empresa)
 }
 
 export interface Routine {
@@ -91,8 +92,11 @@ export interface User {
   preferences?: UserPreferences;
   emailVerified?: boolean;
   emailVerificationSentAt?: string;
+  interfaceMode?: AppInterfaceMode;
   createdAt?: string;
 }
+
+export type AppInterfaceMode = 'light' | 'advanced';
 
 export function isSuperUser(user?: User | null): boolean {
   if (!user) return false;
@@ -114,6 +118,170 @@ export function getUserVehicles(user?: User | null): Vehicle[] {
   return [];
 }
 
+export function getGroupDestinationAlias(group?: Partial<Group> | null): string {
+  if (!group) return 'Destino';
+  if (group.destinationAlias && group.destinationAlias.trim()) {
+    return group.destinationAlias.trim();
+  }
+  if (group.defaultDestination?.alias && group.defaultDestination.alias.trim()) {
+    return group.defaultDestination.alias.trim();
+  }
+  // Se o name for diferente do endereço completo, usá-lo como apelido
+  if (
+    group.defaultDestination?.name && 
+    group.defaultDestination.name.trim() && 
+    group.defaultDestination.name.trim() !== group.defaultDestination.address?.trim()
+  ) {
+    return group.defaultDestination.name.trim();
+  }
+  // Se o nome do grupo estiver no formato "Origem - Destino" (ex: "Indaiatuba - Elektro")
+  if (group.name && group.name.includes(' - ')) {
+    const parts = group.name.split(' - ');
+    if (parts.length >= 2 && parts[1].trim()) {
+      return parts[1].trim();
+    }
+  }
+  // Se houver nome de comunidade/empresa associada
+  if (group.communityName && group.communityName.trim()) {
+    return group.communityName.trim();
+  }
+  return group.defaultDestination?.name || group.defaultDestination?.address || 'Polo / Campus Central';
+}
+
+export function isUserMemberOfGroup(
+  group?: Partial<Group> | null,
+  user?: User | null,
+  allUsersList: User[] = []
+): boolean {
+  if (!user || !group) return false;
+  if (isSuperUser(user)) return true;
+
+  // Build a set of all known identifiers for this user (ID, email, and matching allUsers IDs)
+  const userIdentifiers = new Set<string>();
+  if (user.id) userIdentifiers.add(user.id);
+  if (user.email) {
+    const norm = user.email.trim().toLowerCase();
+    userIdentifiers.add(norm);
+    userIdentifiers.add(user.email.trim());
+    allUsersList.forEach((u) => {
+      if (u.email && u.email.trim().toLowerCase() === norm) {
+        if (u.id) userIdentifiers.add(u.id);
+        if (Array.isArray(u.groups) && group.id && u.groups.includes(group.id)) {
+          userIdentifiers.add('IN_USER_GROUPS');
+        }
+      }
+    });
+  }
+
+  // 1. Direct user groups membership array
+  if (group.id && Array.isArray(user.groups) && user.groups.includes(group.id)) {
+    return true;
+  }
+  if (userIdentifiers.has('IN_USER_GROUPS')) {
+    return true;
+  }
+
+  // 2. Creator check
+  if (group.creatorId && userIdentifiers.has(group.creatorId)) {
+    return true;
+  }
+  if (group.creatorEmail && user.email && group.creatorEmail.trim().toLowerCase() === user.email.trim().toLowerCase()) {
+    return true;
+  }
+
+  // 3. Admin check
+  if (Array.isArray(group.adminIds) && group.adminIds.some((aId) => userIdentifiers.has(aId) || (user.email && aId.trim().toLowerCase() === user.email.trim().toLowerCase()))) {
+    return true;
+  }
+
+  // 4. MemberIds check
+  if (Array.isArray(group.memberIds)) {
+    return group.memberIds.some((mId) => {
+      if (!mId) return false;
+      if (userIdentifiers.has(mId)) return true;
+      if (user.email && mId.trim().toLowerCase() === user.email.trim().toLowerCase()) return true;
+      return false;
+    });
+  }
+
+  return false;
+}
+
+export function isUserGroupManager(
+  group?: Partial<Group> | null,
+  user?: User | null,
+  allUsersList: User[] = []
+): boolean {
+  if (!user || !group) return false;
+  if (isSuperUser(user)) return true;
+
+  const userIds = new Set<string>();
+  if (user.id) userIds.add(user.id);
+  if (user.email) {
+    const norm = user.email.trim().toLowerCase();
+    userIds.add(norm);
+    userIds.add(user.email.trim());
+    allUsersList.forEach((u) => {
+      if (u.email && u.email.trim().toLowerCase() === norm && u.id) {
+        userIds.add(u.id);
+      }
+    });
+  }
+
+  if (group.creatorId && userIds.has(group.creatorId)) return true;
+  if (group.creatorEmail && user.email && group.creatorEmail.trim().toLowerCase() === user.email.trim().toLowerCase()) return true;
+  if (Array.isArray(group.adminIds) && group.adminIds.some((aId) => userIds.has(aId) || (user.email && aId.trim().toLowerCase() === user.email.trim().toLowerCase()))) return true;
+
+  return false;
+}
+
+export function isUserPendingJoinGroup(
+  group?: Partial<Group> | null,
+  user?: User | null,
+  allUsersList: User[] = []
+): boolean {
+  if (!user || !group) return false;
+  const userIds = new Set<string>();
+  if (user.id) userIds.add(user.id);
+  if (user.email) {
+    const norm = user.email.trim().toLowerCase();
+    userIds.add(norm);
+    allUsersList.forEach((u) => {
+      if (u.email && u.email.trim().toLowerCase() === norm && u.id) {
+        userIds.add(u.id);
+      }
+    });
+  }
+  return (group.pendingJoinRequests || []).some((r) =>
+    userIds.has(r.userId) ||
+    (user.email && r.userEmail && r.userEmail.trim().toLowerCase() === user.email.trim().toLowerCase())
+  );
+}
+
+export function isUserInvitedToGroup(
+  group?: Partial<Group> | null,
+  user?: User | null,
+  allUsersList: User[] = []
+): boolean {
+  if (!user || !group) return false;
+  const userIds = new Set<string>();
+  if (user.id) userIds.add(user.id);
+  if (user.email) {
+    const norm = user.email.trim().toLowerCase();
+    userIds.add(norm);
+    allUsersList.forEach((u) => {
+      if (u.email && u.email.trim().toLowerCase() === norm && u.id) {
+        userIds.add(u.id);
+      }
+    });
+  }
+  return (group.pendingInvitations || []).some((inv) =>
+    userIds.has(inv.userId) ||
+    (user.email && inv.userEmail && inv.userEmail.trim().toLowerCase() === user.email.trim().toLowerCase())
+  );
+}
+
+
 export interface GroupJoinRequest {
   userId: string;
   userName: string;
@@ -121,6 +289,7 @@ export interface GroupJoinRequest {
   userEmail?: string;
   institutionName?: string;
   requestedAt: string;
+  status?: 'pending' | 'approved' | 'rejected';
 }
 
 export interface GroupInvitation {
@@ -160,20 +329,37 @@ export interface Group {
   recurringDays?: string[]; // Ex: ['Seg', 'Ter', 'Qua', 'Qui', 'Sex']
   memberIds: string[];
   memberCount?: number;
+  blockedMemberIds?: string[]; // Membros que continuam no grupo mas têm adesão automática bloqueada às viagens do grupo
   description: string;
   icon: string;
   createdAt: string;
   // Gestão e Criador
   creatorId?: string;
   creatorName?: string;
+  creatorEmail?: string;
   adminIds?: string[];
   // Dados Padrão de Viagem
   defaultDestination: GeoLocation;
+  destinationAlias?: string;
   defaultPrice: number;
   defaultDepartureTime: string;
+  defaultReturnTime?: string; // Horário típico de retorno
   // Filas de Gestão
   pendingJoinRequests?: GroupJoinRequest[];
   pendingInvitations?: GroupInvitation[];
+}
+
+export type TripSegmentType = 'ida_e_volta' | 'somente_ida' | 'somente_volta';
+
+export interface SegmentChangeRequest {
+  id: string;
+  userId: string;
+  userName: string;
+  userAvatar: string;
+  requestedSegmentType: TripSegmentType;
+  currentSegmentType: TripSegmentType;
+  requestedAt: string;
+  status: 'pending' | 'approved' | 'rejected';
 }
 
 export interface PassengerParticipant {
@@ -185,6 +371,8 @@ export interface PassengerParticipant {
   autoAccepted: boolean;
   institutionName?: string;
   agreedPrice?: number;
+  segmentType?: TripSegmentType; // Trecho escolhido pelo passageiro (padrão: ida_e_volta)
+  segmentChangePending?: TripSegmentType; // Novo trecho solicitado aguardando aprovação do motorista
 }
 
 export interface PendingRequest {
@@ -195,6 +383,7 @@ export interface PendingRequest {
   requestedAt: string;
   institutionName?: string;
   distanceFromRouteMeters?: number;
+  requestedSegmentType?: TripSegmentType;
 }
 
 export interface Waypoint {
@@ -237,8 +426,12 @@ export interface Ride {
   driverVehicle?: Vehicle;
   origin: GeoLocation;
   destination: GeoLocation;
+  destinationAlias?: string; // Nome da empresa ou faculdade exibido no campo destino dos cards
   departureTime: string; // ISO date string or HH:MM
   departureDate: string; // YYYY-MM-DD
+  returnTime?: string; // Horário de retorno (opcional ou padrão da viagem)
+  segmentType?: TripSegmentType; // Padrão: 'ida_e_volta', ou 'somente_ida', 'somente_volta'
+  segmentChangeRequests?: SegmentChangeRequest[]; // Solicitações de alteração de trecho feitas por passageiros aguardando aprovação do motorista
   price: number;
   totalSeats: number;
   occupiedSeats: number;
@@ -285,7 +478,7 @@ export interface LedgerTransaction {
   counterpartName?: string;
   counterpartId?: string;
   paymentMethod?: string;
-  status?: 'COMPLETED' | 'PENDING' | 'SETTLED' | 'PENDING_CONFIRMATION';
+  status?: 'COMPLETED' | 'PENDING' | 'SETTLED' | 'PENDING_CONFIRMATION' | 'REJECTED';
   initiatedBy?: 'passenger' | 'driver' | 'system';
   passengerId?: string;
   driverId?: string;
@@ -326,12 +519,14 @@ export interface PushNotification {
   userId: string;
   title: string;
   body: string;
-  type: 'NEW_RIDE_GROUP' | 'DRIVER_STARTED' | 'RIDE_ACCEPTED' | 'RIDE_COMPLETED' | 'NEW_REQUEST' | 'PROPOSAL_RECEIVED' | 'PROPOSAL_ACCEPTED' | 'PROPOSAL_REJECTED' | 'SETTLEMENT_REQUEST' | 'SETTLEMENT_CONFIRMED' | 'SETTLEMENT_REJECTED' | 'SYSTEM_ANNOUNCEMENT';
+  type: 'NEW_RIDE_GROUP' | 'DRIVER_STARTED' | 'RIDE_ACCEPTED' | 'RIDE_COMPLETED' | 'NEW_REQUEST' | 'PROPOSAL_RECEIVED' | 'PROPOSAL_ACCEPTED' | 'PROPOSAL_REJECTED' | 'SETTLEMENT_REQUEST' | 'SETTLEMENT_CONFIRMED' | 'SETTLEMENT_REJECTED' | 'SYSTEM_ANNOUNCEMENT' | 'RIDE_CANCELLED' | 'PASSENGER_REMOVED' | 'EMAIL_DELIVERY_FAILED';
   timestamp: string;
   read: boolean;
   rideId?: string;
   settlementId?: string;
   counterpartId?: string;
+  failedEmail?: string;
+  failureReason?: string;
 }
 
 export interface GeminiRoutineSuggestion {

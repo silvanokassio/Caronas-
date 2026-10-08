@@ -35,7 +35,15 @@ import {
   ExternalLink,
   Info,
   Calendar,
-  AlertTriangle
+  AlertTriangle,
+  Sliders,
+  LogIn,
+  Navigation,
+  Music,
+  Wind,
+  Dog,
+  Clock,
+  Settings
 } from 'lucide-react';
 import { User, Group, Vehicle, isSuperUser, GeoLocation } from '../types';
 import { 
@@ -53,6 +61,8 @@ interface SuperUserManagementViewProps {
   groups: Group[];
   onUsersUpdated?: () => void;
   onNavigateToTab?: (tab: string) => void;
+  onStartSupportSession?: (targetUser: User) => void;
+  onOpenUserProfile?: (targetUser: User) => void;
 }
 
 export const SuperUserManagementView: React.FC<SuperUserManagementViewProps> = ({
@@ -60,7 +70,9 @@ export const SuperUserManagementView: React.FC<SuperUserManagementViewProps> = (
   allUsers,
   groups,
   onUsersUpdated,
-  onNavigateToTab
+  onNavigateToTab,
+  onStartSupportSession,
+  onOpenUserProfile,
 }) => {
   // Search and Filtering State
   const [searchQuery, setSearchQuery] = useState('');
@@ -89,6 +101,7 @@ export const SuperUserManagementView: React.FC<SuperUserManagementViewProps> = (
 
   // Success Notification Toast within view
   const [toastMessage, setToastMessage] = useState<{ title: string; text: string; type: 'success' | 'error' | 'info' } | null>(null);
+  const [showIconsLegend, setShowIconsLegend] = useState(true);
 
   const showToast = (title: string, text: string, type: 'success' | 'error' | 'info' = 'success') => {
     setToastMessage({ title, text, type });
@@ -96,6 +109,9 @@ export const SuperUserManagementView: React.FC<SuperUserManagementViewProps> = (
       setToastMessage(null);
     }, 4500);
   };
+
+  // Unverified users for quick batch validation
+  const unverifiedUsers = useMemo(() => allUsers.filter((u) => !u.emailVerified), [allUsers]);
 
   // Identify Orphan Groups (groups where no members or creators exist in allUsers)
   const orphanGroups = useMemo(() => {
@@ -258,6 +274,34 @@ export const SuperUserManagementView: React.FC<SuperUserManagementViewProps> = (
     }
   };
 
+  // Handler: Batch verify all pending user emails
+  const handleBatchVerifyEmails = async () => {
+    if (unverifiedUsers.length === 0) {
+      showToast('Tudo em dia', 'Não há usuários com validação de e-mail pendente.', 'info');
+      return;
+    }
+
+    if (!window.confirm(`Deseja aprovar e validar o e-mail oficial de todos os ${unverifiedUsers.length} usuários pendentes agora?`)) {
+      return;
+    }
+
+    try {
+      for (const u of unverifiedUsers) {
+        await updateFirestoreUserProfile(u.id, {
+          emailVerified: true,
+        });
+      }
+      showToast(
+        'E-mails Validados!',
+        `${unverifiedUsers.length} usuário(s) tiveram seus e-mails verificados no Firestore com sucesso.`
+      );
+      onUsersUpdated?.();
+    } catch (err) {
+      console.error(err);
+      showToast('Erro ao validar e-mails em lote', String(err), 'error');
+    }
+  };
+
   // Handler: Quick Balance Adjustment
   const handleApplyBalanceAdjustment = async () => {
     if (!balanceUser) return;
@@ -277,7 +321,7 @@ export const SuperUserManagementView: React.FC<SuperUserManagementViewProps> = (
           type: balanceAdjustment > 0 ? 'BONUS_RECIPROCITY' : 'SETTLEMENT',
           category: balanceAdjustment > 0 ? 'BONUS' : 'REFUND',
           status: 'COMPLETED',
-          description: balanceAdjustmentNotes || `Ajuste manual efetuado pelo Superadministrador (${balanceAdjustment > 0 ? '+' : ''}${balanceAdjustment} pontos / R$ ${(balanceAdjustment * 6.5).toFixed(2)})`,
+          description: balanceAdjustmentNotes || `Ajuste manual efetuado pelo Superadministrador (${balanceAdjustment > 0 ? '+' : ''}R$ ${(balanceAdjustment * 6.5).toFixed(2)})`,
           counterpartName: 'Superadministrador (Ajuste do Sistema)',
           timestamp: new Date().toISOString(),
         });
@@ -285,7 +329,7 @@ export const SuperUserManagementView: React.FC<SuperUserManagementViewProps> = (
 
       showToast(
         'Saldo Ajustado!',
-        `Novo saldo de ${balanceUser.name}: ${newSaldo} pontos (R$ ${(newSaldo * 6.5 + 39).toFixed(2)}).`
+        `Novo saldo de ${balanceUser.name}: R$ ${(newSaldo * 6.5).toFixed(2)}.`
       );
       setBalanceUser(null);
       setBalanceAdjustment(0);
@@ -354,7 +398,7 @@ export const SuperUserManagementView: React.FC<SuperUserManagementViewProps> = (
       isSuperUser(u) ? 'SIM' : 'NAO',
       u.emailVerified ? 'SIM' : 'NAO',
       u.saldo_caronas || 0,
-      ((u.saldo_caronas || 0) * 6.5 + 39).toFixed(2),
+      ((u.saldo_caronas || 0) * 6.5).toFixed(2),
       u.rating || 5.0,
       u.totalRidesOffered || 0,
       u.totalRidesTaken || 0,
@@ -684,22 +728,183 @@ export const SuperUserManagementView: React.FC<SuperUserManagementViewProps> = (
 
       {/* Users Count and List View */}
       <div className="space-y-4">
-        <div className="flex items-center justify-between text-xs text-slate-500 font-medium px-1">
-          <span>Mostrando <strong className="text-slate-900">{filteredUsers.length}</strong> de {allUsers.length} usuários cadastrados</span>
-          {searchQuery && (
+        <div className="flex items-center justify-between text-xs text-slate-500 font-medium px-1 flex-wrap gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span>Mostrando <strong className="text-slate-900">{filteredUsers.length}</strong> de {allUsers.length} usuários cadastrados</span>
+            {unverifiedUsers.length > 0 && (
+              <button
+                type="button"
+                id="btn-batch-verify-emails"
+                onClick={handleBatchVerifyEmails}
+                className="px-2.5 py-1 bg-amber-50 hover:bg-emerald-50 text-amber-800 hover:text-emerald-800 border border-amber-300 hover:border-emerald-300 rounded-lg text-[11px] font-bold transition flex items-center gap-1.5 cursor-pointer shadow-2xs"
+                title={`Aprovar e validar e-mails de todos os ${unverifiedUsers.length} usuários pendentes no Firestore`}
+              >
+                <ShieldCheck className="w-3.5 h-3.5 text-amber-600" />
+                <span>Validar Todos os E-mails Pendentes ({unverifiedUsers.length})</span>
+              </button>
+            )}
+          </div>
+          <div className="flex items-center gap-3">
             <button
-              onClick={() => {
-                setSearchQuery('');
-                setRoleFilter('all');
-                setVerifiedFilter('all');
-                setAssetFilter('all');
-              }}
-              className="text-indigo-600 hover:text-indigo-800 font-semibold cursor-pointer"
+              type="button"
+              id="btn-toggle-icons-legend"
+              onClick={() => setShowIconsLegend(!showIconsLegend)}
+              className="px-2.5 py-1 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded-lg font-bold flex items-center gap-1.5 cursor-pointer transition border border-indigo-200/60"
+              title="Exibir ou ocultar a legenda explicativa dos ícones de ação"
             >
-              Limpar todos os filtros
+              <Info className="w-3.5 h-3.5 text-indigo-600" />
+              <span>{showIconsLegend ? 'Ocultar Legenda dos Ícones' : 'Ver Legenda dos Ícones'}</span>
             </button>
-          )}
+            {searchQuery && (
+              <button
+                onClick={() => {
+                  setSearchQuery('');
+                  setRoleFilter('all');
+                  setVerifiedFilter('all');
+                  setAssetFilter('all');
+                }}
+                className="text-indigo-600 hover:text-indigo-800 font-semibold cursor-pointer"
+              >
+                Limpar todos os filtros
+              </button>
+            )}
+          </div>
         </div>
+
+        {/* Dedicated Icons Legend Card */}
+        {showIconsLegend && (
+          <div className="p-4 bg-gradient-to-br from-slate-50 via-white to-indigo-50/20 border border-slate-200 rounded-2xl shadow-xs space-y-3">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <div className="w-7 h-7 rounded-xl bg-indigo-100 text-indigo-700 flex items-center justify-center font-bold">
+                  <Info className="w-4 h-4" />
+                </div>
+                <div>
+                  <h4 className="text-xs font-bold text-slate-800">
+                    Legenda de Ações Rápidas & Ícones do Superusuário
+                  </h4>
+                  <p className="text-[11px] text-slate-500">
+                    Guia de referência para cada ícone e indicador exibido na listagem de usuários:
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowIconsLegend(false)}
+                className="p-1 text-slate-400 hover:text-slate-600 rounded-lg cursor-pointer"
+                title="Fechar legenda"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5 pt-1">
+              {/* 1. Grupos */}
+              <div className="flex items-start gap-2.5 p-2.5 bg-white border border-slate-200/80 rounded-xl shadow-2xs">
+                <div className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-100 text-slate-700 border border-slate-200 shrink-0 mt-0.5">
+                  1 grupo(s)
+                </div>
+                <div className="min-w-0">
+                  <span className="text-xs font-bold text-slate-800 block">Grupos / Comunidades</span>
+                  <p className="text-[11px] text-slate-500 leading-tight">
+                    Quantidade de grupos de carona compartilhada em que o usuário está inscrito.
+                  </p>
+                </div>
+              </div>
+
+              {/* 2. Ajustar Saldo */}
+              <div className="flex items-start gap-2.5 p-2.5 bg-white border border-slate-200/80 rounded-xl shadow-2xs">
+                <div className="p-1.5 bg-emerald-50 text-emerald-700 rounded-lg shrink-0 mt-0.5">
+                  <CreditCard className="w-3.5 h-3.5" />
+                </div>
+                <div className="min-w-0">
+                  <span className="text-xs font-bold text-slate-800 block">Ajustar Saldo em Conta (R$)</span>
+                  <p className="text-[11px] text-slate-500 leading-tight">
+                    Credita ou debita valores em R$ diretamente no extrato financeiro do usuário.
+                  </p>
+                </div>
+              </div>
+
+              {/* 3. Validar E-mail */}
+              <div className="flex items-start gap-2.5 p-2.5 bg-white border border-emerald-200/80 rounded-xl shadow-2xs">
+                <div className="p-1.5 bg-emerald-50 text-emerald-600 rounded-lg shrink-0 mt-0.5 flex items-center gap-0.5">
+                  <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
+                </div>
+                <div className="min-w-0">
+                  <span className="text-xs font-bold text-emerald-900 block">Validar E-mail Oficial</span>
+                  <p className="text-[11px] text-slate-500 leading-tight">
+                    <strong className="text-emerald-700">Verificado</strong> (verde) ou <strong className="text-amber-700">Pendente</strong> (laranja). Clique para validar ou revogar.
+                  </p>
+                </div>
+              </div>
+
+              {/* 4. SuperAdmin */}
+              <div className="flex items-start gap-2.5 p-2.5 bg-white border border-amber-200/80 rounded-xl shadow-2xs">
+                <div className="p-1.5 bg-amber-50 text-amber-600 rounded-lg shrink-0 mt-0.5">
+                  <Crown className="w-3.5 h-3.5 text-amber-600" />
+                </div>
+                <div className="min-w-0">
+                  <span className="text-xs font-bold text-amber-900 block">Superadministrador</span>
+                  <p className="text-[11px] text-slate-500 leading-tight">
+                    Promove a SuperAdmin (dourado) com bypass total ou rebaixa para usuário comum (cinza).
+                  </p>
+                </div>
+              </div>
+
+              {/* 5. Modo Suporte */}
+              <div className="flex items-start gap-2.5 p-2.5 bg-white border border-slate-200/80 rounded-xl shadow-2xs">
+                <div className="p-1.5 bg-amber-500/10 text-amber-700 rounded-lg shrink-0 mt-0.5">
+                  <LogIn className="w-3.5 h-3.5" />
+                </div>
+                <div className="min-w-0">
+                  <span className="text-xs font-bold text-slate-800 block">Modo Suporte (Impersonar)</span>
+                  <p className="text-[11px] text-slate-500 leading-tight">
+                    Assume a sessão do usuário temporariamente para navegar com a visão exata dele.
+                  </p>
+                </div>
+              </div>
+
+              {/* 6. Área do Usuário */}
+              <div className="flex items-start gap-2.5 p-2.5 bg-white border border-purple-200/80 rounded-xl shadow-2xs">
+                <div className="p-1.5 bg-purple-50 text-purple-700 rounded-lg shrink-0 mt-0.5">
+                  <Sliders className="w-3.5 h-3.5" />
+                </div>
+                <div className="min-w-0">
+                  <span className="text-xs font-bold text-purple-900 block">Área do Usuário</span>
+                  <p className="text-[11px] text-slate-500 leading-tight">
+                    Acessa o painel de preferências, rotinas diárias e garagem sob a ótica do usuário.
+                  </p>
+                </div>
+              </div>
+
+              {/* 7. Editar Cadastro */}
+              <div className="flex items-start gap-2.5 p-2.5 bg-white border border-indigo-200/80 rounded-xl shadow-2xs">
+                <div className="p-1.5 bg-indigo-50 text-indigo-700 rounded-lg shrink-0 mt-0.5">
+                  <Edit3 className="w-3.5 h-3.5" />
+                </div>
+                <div className="min-w-0">
+                  <span className="text-xs font-bold text-indigo-900 block">Editar Cadastro Completo</span>
+                  <p className="text-[11px] text-slate-500 leading-tight">
+                    Edita dados cadastrais, CPF, chave PIX, endereço, veículos e permissões no Firestore.
+                  </p>
+                </div>
+              </div>
+
+              {/* 8. Excluir */}
+              <div className="flex items-start gap-2.5 p-2.5 bg-white border border-rose-200/80 rounded-xl shadow-2xs">
+                <div className="p-1.5 bg-rose-50 text-rose-600 rounded-lg shrink-0 mt-0.5">
+                  <Trash2 className="w-3.5 h-3.5" />
+                </div>
+                <div className="min-w-0">
+                  <span className="text-xs font-bold text-rose-900 block">Excluir Usuário</span>
+                  <p className="text-[11px] text-slate-500 leading-tight">
+                    Exclui a conta e vínculos do usuário de forma definitiva (exige digitar "EXCLUIR").
+                  </p>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
 
         {filteredUsers.length === 0 ? (
           <div className="p-12 text-center bg-white border border-slate-200 rounded-2xl space-y-3">
@@ -733,7 +938,19 @@ export const SuperUserManagementView: React.FC<SuperUserManagementViewProps> = (
                     <th className="py-3 px-4">Veículo</th>
                     <th className="py-3 px-4">Saldo / Avaliação</th>
                     <th className="py-3 px-4">Grupos</th>
-                    <th className="py-3 px-4 text-right">Ações</th>
+                    <th className="py-3 px-4 text-right">
+                      <div className="flex items-center justify-end gap-1">
+                        <span>Ações</span>
+                        <button
+                          type="button"
+                          onClick={() => setShowIconsLegend(!showIconsLegend)}
+                          className="text-indigo-600 hover:text-indigo-800 text-[10px] normal-case font-bold ml-1 cursor-pointer"
+                          title="Ver legenda detalhada dos ícones"
+                        >
+                          {showIconsLegend ? '(ocultar guia)' : '(ver guia)'}
+                        </button>
+                      </div>
+                    </th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
@@ -741,7 +958,7 @@ export const SuperUserManagementView: React.FC<SuperUserManagementViewProps> = (
                     const isUserSuper = isSuperUser(user);
                     const vehicle = user.vehicles?.[0] || user.vehicle;
                     const balance = user.saldo_caronas || 0;
-                    const balanceReais = balance * 6.5 + 39;
+                    const balanceReais = balance * 6.5;
 
                     return (
                       <tr key={user.id} className="hover:bg-slate-50/80 transition-colors">
@@ -793,15 +1010,25 @@ export const SuperUserManagementView: React.FC<SuperUserManagementViewProps> = (
                             </div>
                             <div>
                               {user.emailVerified ? (
-                                <span className="inline-flex items-center gap-1 text-[10px] font-bold text-emerald-700">
-                                  <CheckCircle2 className="w-3 h-3 text-emerald-500" />
-                                  E-mail Verificado
-                                </span>
+                                <button
+                                  type="button"
+                                  onClick={() => handleToggleEmailVerified(user)}
+                                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-emerald-50 hover:bg-slate-100 border border-emerald-200 hover:border-slate-300 text-[10px] font-bold text-emerald-800 hover:text-slate-700 transition cursor-pointer"
+                                  title="E-mail verificado no sistema. Clique para revogar a validação se necessário."
+                                >
+                                  <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+                                  <span>E-mail Verificado ✓</span>
+                                </button>
                               ) : (
-                                <span className="inline-flex items-center gap-1 text-[10px] font-bold text-amber-700">
-                                  <AlertCircle className="w-3 h-3 text-amber-500" />
-                                  Validação Pendente
-                                </span>
+                                <button
+                                  type="button"
+                                  onClick={() => handleToggleEmailVerified(user)}
+                                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-amber-50 hover:bg-emerald-100 border border-amber-300 hover:border-emerald-400 text-[10px] font-bold text-amber-900 hover:text-emerald-900 transition cursor-pointer shadow-2xs"
+                                  title="Clique para aprovar e validar o e-mail deste usuário agora com 1 toque"
+                                >
+                                  <ShieldCheck className="w-3 h-3 text-amber-600" />
+                                  <span>Validar E-mail</span>
+                                </button>
                               )}
                             </div>
                           </div>
@@ -827,19 +1054,18 @@ export const SuperUserManagementView: React.FC<SuperUserManagementViewProps> = (
                         {/* Saldo & Stats */}
                         <td className="py-3.5 px-4">
                           <div>
-                            <p className={`font-bold font-mono text-xs ${balance >= 0 ? 'text-emerald-700' : 'text-rose-600'}`}>
-                              {balance >= 0 ? `+ R$ ${balanceReais.toFixed(2)}` : `- R$ ${Math.abs(balance * 6.5).toFixed(2)}`}
-                              <span className="text-[10px] text-slate-400 font-normal ml-1">({balance} pts)</span>
+                            <p className={`font-bold font-mono text-xs ${balance > 0 ? 'text-emerald-700' : balance < 0 ? 'text-rose-600' : 'text-slate-600'}`}>
+                              {balance > 0 ? `+ R$ ${balanceReais.toFixed(2)}` : balance < 0 ? `- R$ ${Math.abs(balanceReais).toFixed(2)}` : 'R$ 0,00'}
                             </p>
                             <div className="flex items-center space-x-2 text-[10px] text-slate-500 mt-0.5">
-                              <span className="flex items-center text-amber-600 font-bold">
+                              <span className="flex items-center text-amber-600 font-bold" title={`Avaliação: ${user.rating || 5.0} estrelas`}>
                                 <Star className="w-3 h-3 fill-amber-400 text-amber-400 mr-0.5" />
                                 {user.rating || 5.0}
                               </span>
                               <span>•</span>
-                              <span>{user.totalRidesOffered || 0} ofertadas</span>
+                              <span title="Caronas ofertadas">{user.totalRidesOffered || 0} ofertadas</span>
                               <span>•</span>
-                              <span>{user.totalRidesTaken || 0} pegas</span>
+                              <span title="Caronas pegas">{user.totalRidesTaken || 0} pegas</span>
                             </div>
                           </div>
                         </td>
@@ -862,7 +1088,7 @@ export const SuperUserManagementView: React.FC<SuperUserManagementViewProps> = (
                                 setBalanceAdjustmentNotes('');
                               }}
                               className="p-1.5 text-slate-500 hover:text-emerald-700 hover:bg-emerald-50 rounded-lg transition cursor-pointer"
-                              title="Ajustar Saldo"
+                              title="Ajustar Saldo (Pontos e R$)"
                             >
                               <CreditCard className="w-3.5 h-3.5" />
                             </button>
@@ -870,12 +1096,12 @@ export const SuperUserManagementView: React.FC<SuperUserManagementViewProps> = (
                             {/* Quick Verify Email */}
                             <button
                               onClick={() => handleToggleEmailVerified(user)}
-                              className={`p-1.5 rounded-lg transition cursor-pointer ${
+                              className={`p-1.5 rounded-lg transition cursor-pointer border ${
                                 user.emailVerified 
-                                  ? 'text-emerald-600 hover:bg-emerald-50' 
-                                  : 'text-amber-600 hover:bg-amber-50'
+                                  ? 'text-emerald-600 hover:bg-emerald-50 border-emerald-200/60 bg-emerald-50/40' 
+                                  : 'text-amber-700 bg-amber-50 hover:bg-emerald-100 border-amber-300 hover:border-emerald-400'
                               }`}
-                              title={user.emailVerified ? 'Marcar e-mail como não verificado' : 'Aprovar/Validar e-mail manualmente'}
+                              title={user.emailVerified ? 'E-mail Verificado (clique para revogar validação)' : 'Clique para validar o e-mail deste usuário'}
                             >
                               <ShieldCheck className="w-3.5 h-3.5" />
                             </button>
@@ -892,6 +1118,28 @@ export const SuperUserManagementView: React.FC<SuperUserManagementViewProps> = (
                             >
                               <Crown className="w-3.5 h-3.5" />
                             </button>
+
+                            {/* Support Session (Impersonate) */}
+                            {onStartSupportSession && (
+                              <button
+                                onClick={() => onStartSupportSession(user)}
+                                className="p-1.5 text-amber-600 hover:bg-amber-50 rounded-lg transition cursor-pointer"
+                                title={`Assumir sessão e navegar como ${user.name}`}
+                              >
+                                <LogIn className="w-3.5 h-3.5" />
+                              </button>
+                            )}
+
+                            {/* Open in User Area for Support & Settings */}
+                            {onOpenUserProfile && (
+                              <button
+                                onClick={() => onOpenUserProfile(user)}
+                                className="p-1.5 text-purple-600 hover:bg-purple-50 rounded-lg transition cursor-pointer"
+                                title={`Abrir configurações e perfil de ${user.name} na Área do Usuário`}
+                              >
+                                <Sliders className="w-3.5 h-3.5" />
+                              </button>
+                            )}
 
                             {/* Edit Profile */}
                             <button
@@ -932,7 +1180,7 @@ export const SuperUserManagementView: React.FC<SuperUserManagementViewProps> = (
               const isUserSuper = isSuperUser(user);
               const vehicle = user.vehicles?.[0] || user.vehicle;
               const balance = user.saldo_caronas || 0;
-              const balanceReais = balance * 6.5 + 39;
+              const balanceReais = balance * 6.5;
 
               return (
                 <div key={user.id} className="p-5 bg-white border border-slate-200 rounded-2xl shadow-xs space-y-4 hover:border-slate-300 transition-all flex flex-col justify-between">
@@ -970,20 +1218,30 @@ export const SuperUserManagementView: React.FC<SuperUserManagementViewProps> = (
                     <div className="flex items-center justify-between">
                       <span className="text-slate-500 text-[11px]">Validação:</span>
                       {user.emailVerified ? (
-                        <span className="text-emerald-700 font-bold flex items-center gap-1 text-[11px]">
-                          <CheckCircle2 className="w-3 h-3 text-emerald-500" /> Verificado
-                        </span>
+                        <button
+                          type="button"
+                          onClick={() => handleToggleEmailVerified(user)}
+                          className="text-emerald-700 hover:text-slate-600 font-bold flex items-center gap-1 text-[11px] cursor-pointer transition"
+                          title="E-mail verificado. Clique para revogar."
+                        >
+                          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" /> Verificado ✓
+                        </button>
                       ) : (
-                        <span className="text-amber-700 font-bold flex items-center gap-1 text-[11px]">
-                          <AlertCircle className="w-3 h-3 text-amber-500" /> Pendente
-                        </span>
+                        <button
+                          type="button"
+                          onClick={() => handleToggleEmailVerified(user)}
+                          className="px-2 py-0.5 bg-amber-50 hover:bg-emerald-50 border border-amber-300 hover:border-emerald-400 text-amber-900 hover:text-emerald-900 font-bold flex items-center gap-1 text-[10px] rounded-md transition cursor-pointer shadow-2xs"
+                          title="Clique para validar o e-mail deste usuário agora com 1 toque"
+                        >
+                          <ShieldCheck className="w-3 h-3 text-amber-600" /> Validar E-mail
+                        </button>
                       )}
                     </div>
 
                     <div className="flex items-center justify-between">
                       <span className="text-slate-500 text-[11px]">Saldo em Conta:</span>
-                      <span className={`font-bold font-mono ${balance >= 0 ? 'text-emerald-700' : 'text-rose-600'}`}>
-                        {balance >= 0 ? `+ R$ ${balanceReais.toFixed(2)}` : `- R$ ${Math.abs(balance * 6.5).toFixed(2)}`}
+                      <span className={`font-bold font-mono ${balance > 0 ? 'text-emerald-700' : balance < 0 ? 'text-rose-600' : 'text-slate-600'}`}>
+                        {balance > 0 ? `+ R$ ${balanceReais.toFixed(2)}` : balance < 0 ? `- R$ ${Math.abs(balance * 6.5).toFixed(2)}` : 'R$ 0,00'}
                       </span>
                     </div>
 
@@ -1027,6 +1285,26 @@ export const SuperUserManagementView: React.FC<SuperUserManagementViewProps> = (
                     </div>
 
                     <div className="flex items-center space-x-1">
+                      {onStartSupportSession && (
+                        <button
+                          onClick={() => onStartSupportSession(user)}
+                          className="p-1.5 text-amber-600 hover:bg-amber-50 rounded-lg transition cursor-pointer"
+                          title={`Assumir sessão de ${user.name}`}
+                        >
+                          <LogIn className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+
+                      {onOpenUserProfile && (
+                        <button
+                          onClick={() => onOpenUserProfile(user)}
+                          className="p-1.5 text-purple-600 hover:bg-purple-50 rounded-lg transition cursor-pointer"
+                          title={`Abrir na Área do Usuário`}
+                        >
+                          <Sliders className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+
                       <button
                         onClick={() => {
                           setEditingUser({ ...user });
@@ -1216,24 +1494,24 @@ export const SuperUserManagementView: React.FC<SuperUserManagementViewProps> = (
               {/* Financial & Balances */}
               <div className="space-y-3 pt-2 border-t border-slate-100">
                 <h4 className="text-[11px] font-bold text-indigo-700 uppercase tracking-wider flex items-center gap-1.5">
-                  <Coins className="w-3.5 h-3.5" />
-                  3. Balanço Financeiro & Pontuação
+                  <CreditCard className="w-3.5 h-3.5" />
+                  3. Balanço Financeiro (R$) & Avaliação
                 </h4>
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div>
-                    <label className="text-[10px] font-bold text-slate-500 block mb-1">Saldo em Pontos (Caronas)</label>
-                    <input
-                      type="number"
-                      value={editingUser.saldo_caronas ?? 0}
-                      onChange={(e) => setEditingUser({ ...editingUser, saldo_caronas: parseInt(e.target.value) || 0 })}
-                      className="w-full px-3 py-2 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 font-mono font-bold"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="text-[10px] font-bold text-slate-500 block mb-1">Equivalente em R$ (Base)</label>
-                    <div className="px-3 py-2 bg-slate-100 border border-slate-200 rounded-xl font-mono font-bold text-slate-700">
-                      R$ {(((editingUser.saldo_caronas || 0) * 6.5) + 39).toFixed(2)}
+                    <label className="text-[10px] font-bold text-slate-500 block mb-1">Saldo em Conta (R$)</label>
+                    <div className="relative">
+                      <span className="absolute left-3 top-2.5 text-slate-400 font-mono text-xs font-bold">R$</span>
+                      <input
+                        type="number"
+                        step="0.50"
+                        value={Number(((editingUser.saldo_caronas ?? 0) * 6.5).toFixed(2))}
+                        onChange={(e) => {
+                          const val = parseFloat(e.target.value) || 0;
+                          setEditingUser({ ...editingUser, saldo_caronas: Math.round((val / 6.5) * 100) / 100 });
+                        }}
+                        className="w-full pl-9 pr-3 py-2 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 font-mono font-bold text-sm"
+                      />
                     </div>
                   </div>
 
@@ -1246,7 +1524,7 @@ export const SuperUserManagementView: React.FC<SuperUserManagementViewProps> = (
                       max="5.0"
                       value={editingUser.rating ?? 5.0}
                       onChange={(e) => setEditingUser({ ...editingUser, rating: parseFloat(e.target.value) || 5.0 })}
-                      className="w-full px-3 py-2 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 font-mono font-bold"
+                      className="w-full px-3 py-2 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 font-mono font-bold text-sm"
                     />
                   </div>
                 </div>
@@ -1290,17 +1568,330 @@ export const SuperUserManagementView: React.FC<SuperUserManagementViewProps> = (
                   })}
                 </div>
               </div>
+
+              {/* 5. Garagem & Veículo Principal */}
+              <div className="space-y-3 pt-2 border-t border-slate-100">
+                <h4 className="text-[11px] font-bold text-indigo-700 uppercase tracking-wider flex items-center gap-1.5">
+                  <Car className="w-3.5 h-3.5" />
+                  5. Garagem & Veículo Principal
+                </h4>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 p-3 bg-slate-50 border border-slate-200 rounded-2xl">
+                  <div>
+                    <label className="text-[10px] font-bold text-slate-500 block mb-1">Modelo do Veículo</label>
+                    <input
+                      type="text"
+                      placeholder="Ex: Honda Civic, Fiat Argo"
+                      value={editingUser.vehicle?.model || ''}
+                      onChange={(e) => {
+                        const currentV = editingUser.vehicle || { id: 'veh-1', model: '', plate: '', color: '', year: '2023', availableSeats: 4 };
+                        const updated = { ...currentV, model: e.target.value };
+                        setEditingUser({ 
+                          ...editingUser, 
+                          vehicle: updated,
+                          vehicles: [updated]
+                        });
+                      }}
+                      className="w-full px-3 py-2 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 text-xs font-medium"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[10px] font-bold text-slate-500 block mb-1">Placa do Veículo</label>
+                    <input
+                      type="text"
+                      placeholder="Ex: ABC-1234"
+                      value={editingUser.vehicle?.plate || ''}
+                      onChange={(e) => {
+                        const currentV = editingUser.vehicle || { id: 'veh-1', model: '', plate: '', color: '', year: '2023', availableSeats: 4 };
+                        const updated = { ...currentV, plate: e.target.value.toUpperCase() };
+                        setEditingUser({ 
+                          ...editingUser, 
+                          vehicle: updated,
+                          vehicles: [updated]
+                        });
+                      }}
+                      className="w-full px-3 py-2 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 text-xs font-mono font-bold uppercase"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[10px] font-bold text-slate-500 block mb-1">Cor & Ano</label>
+                    <div className="grid grid-cols-2 gap-2">
+                      <input
+                        type="text"
+                        placeholder="Cor (ex: Prata)"
+                        value={editingUser.vehicle?.color || ''}
+                        onChange={(e) => {
+                          const currentV = editingUser.vehicle || { id: 'veh-1', model: '', plate: '', color: '', year: '2023', availableSeats: 4 };
+                          const updated = { ...currentV, color: e.target.value };
+                          setEditingUser({ ...editingUser, vehicle: updated, vehicles: [updated] });
+                        }}
+                        className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs"
+                      />
+                      <input
+                        type="text"
+                        placeholder="Ano (ex: 2022)"
+                        value={editingUser.vehicle?.year || ''}
+                        onChange={(e) => {
+                          const currentV = editingUser.vehicle || { id: 'veh-1', model: '', plate: '', color: '', year: '2023', availableSeats: 4 };
+                          const updated = { ...currentV, year: e.target.value };
+                          setEditingUser({ ...editingUser, vehicle: updated, vehicles: [updated] });
+                        }}
+                        className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs font-mono"
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <label className="text-[10px] font-bold text-slate-500 block mb-1">Vagas Padrão no Carro</label>
+                    <input
+                      type="number"
+                      min={1}
+                      max={8}
+                      value={editingUser.vehicle?.availableSeats || 4}
+                      onChange={(e) => {
+                        const currentV = editingUser.vehicle || { id: 'veh-1', model: '', plate: '', color: '', year: '2023', availableSeats: 4 };
+                        const updated = { ...currentV, availableSeats: parseInt(e.target.value) || 4 };
+                        setEditingUser({ ...editingUser, vehicle: updated, vehicles: [updated] });
+                      }}
+                      className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs font-mono font-bold"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* 6. Rotina Diária & Horários */}
+              <div className="space-y-3 pt-2 border-t border-slate-100">
+                <h4 className="text-[11px] font-bold text-indigo-700 uppercase tracking-wider flex items-center gap-1.5">
+                  <Clock className="w-3.5 h-3.5" />
+                  6. Rotina Diária de Deslocamento
+                </h4>
+                <div className="p-3 bg-slate-50 border border-slate-200 rounded-2xl space-y-3">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="text-[10px] font-bold text-slate-500 block mb-1">Título da Rotina</label>
+                      <input
+                        type="text"
+                        placeholder="Ex: Ida ao Campus USP Butantã"
+                        value={editingUser.routine?.title || ''}
+                        onChange={(e) => {
+                          const r = editingUser.routine || { id: 'rtn-1', title: '', origin: { address: '', lat: -23.55, lng: -46.63 }, destination: { address: '', lat: -23.56, lng: -46.73 }, departureTime: '07:30', daysOfWeek: ['seg', 'ter', 'qua', 'qui', 'sex'], defaultSeats: 3, defaultPrice: 6.5 };
+                          setEditingUser({ ...editingUser, routine: { ...r, title: e.target.value } });
+                        }}
+                        className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-[10px] font-bold text-slate-500 block mb-1">Horário de Saída Padrão</label>
+                      <input
+                        type="time"
+                        value={editingUser.routine?.departureTime || '07:30'}
+                        onChange={(e) => {
+                          const r = editingUser.routine || { id: 'rtn-1', title: 'Rotina Principal', origin: { address: '', lat: -23.55, lng: -46.63 }, destination: { address: '', lat: -23.56, lng: -46.73 }, departureTime: '07:30', daysOfWeek: ['seg', 'ter', 'qua', 'qui', 'sex'], defaultSeats: 3, defaultPrice: 6.5 };
+                          setEditingUser({ ...editingUser, routine: { ...r, departureTime: e.target.value } });
+                        }}
+                        className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs font-mono font-bold"
+                      />
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="text-[10px] font-bold text-slate-500 block mb-1">Endereço de Origem</label>
+                      <input
+                        type="text"
+                        placeholder="Rua, número, bairro"
+                        value={editingUser.routine?.origin?.address || ''}
+                        onChange={(e) => {
+                          const r = editingUser.routine || { id: 'rtn-1', title: 'Rotina Principal', origin: { address: '', lat: -23.55, lng: -46.63 }, destination: { address: '', lat: -23.56, lng: -46.73 }, departureTime: '07:30', daysOfWeek: ['seg', 'ter', 'qua', 'qui', 'sex'], defaultSeats: 3, defaultPrice: 6.5 };
+                          setEditingUser({ ...editingUser, routine: { ...r, origin: { ...r.origin, address: e.target.value } } });
+                        }}
+                        className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-[10px] font-bold text-slate-500 block mb-1">Endereço de Destino</label>
+                      <input
+                        type="text"
+                        placeholder="Universidade, empresa ou polo"
+                        value={editingUser.routine?.destination?.address || ''}
+                        onChange={(e) => {
+                          const r = editingUser.routine || { id: 'rtn-1', title: 'Rotina Principal', origin: { address: '', lat: -23.55, lng: -46.63 }, destination: { address: '', lat: -23.56, lng: -46.73 }, departureTime: '07:30', daysOfWeek: ['seg', 'ter', 'qua', 'qui', 'sex'], defaultSeats: 3, defaultPrice: 6.5 };
+                          setEditingUser({ ...editingUser, routine: { ...r, destination: { ...r.destination, address: e.target.value } } });
+                        }}
+                        className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs"
+                      />
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* 7. Preferências de Convivência & Viagem */}
+              <div className="space-y-3 pt-2 border-t border-slate-100">
+                <h4 className="text-[11px] font-bold text-indigo-700 uppercase tracking-wider flex items-center gap-1.5">
+                  <Sliders className="w-3.5 h-3.5" />
+                  7. Preferências de Convivência & Viagem
+                </h4>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 p-3 bg-slate-50 border border-slate-200 rounded-2xl text-xs">
+                  <label className="flex items-center space-x-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(editingUser.preferences?.allowMusic)}
+                      onChange={(e) => {
+                        const prefs = editingUser.preferences || {} as any;
+                        setEditingUser({ ...editingUser, preferences: { ...prefs, allowMusic: e.target.checked } });
+                      }}
+                      className="w-4 h-4 text-indigo-600 rounded-md"
+                    />
+                    <span className="text-slate-700 font-medium">Música no Carro</span>
+                  </label>
+
+                  <label className="flex items-center space-x-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(editingUser.preferences?.airConditioning)}
+                      onChange={(e) => {
+                        const prefs = editingUser.preferences || {} as any;
+                        setEditingUser({ ...editingUser, preferences: { ...prefs, airConditioning: e.target.checked } });
+                      }}
+                      className="w-4 h-4 text-indigo-600 rounded-md"
+                    />
+                    <span className="text-slate-700 font-medium">Ar-Condicionado</span>
+                  </label>
+
+                  <label className="flex items-center space-x-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(editingUser.preferences?.allowPets)}
+                      onChange={(e) => {
+                        const prefs = editingUser.preferences || {} as any;
+                        setEditingUser({ ...editingUser, preferences: { ...prefs, allowPets: e.target.checked } });
+                      }}
+                      className="w-4 h-4 text-indigo-600 rounded-md"
+                    />
+                    <span className="text-slate-700 font-medium">Aceita Pets</span>
+                  </label>
+
+                  <label className="flex items-center space-x-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={Boolean(editingUser.preferences?.womenOnlyRides)}
+                      onChange={(e) => {
+                        const prefs = editingUser.preferences || {} as any;
+                        setEditingUser({ ...editingUser, preferences: { ...prefs, womenOnlyRides: e.target.checked } });
+                      }}
+                      className="w-4 h-4 text-rose-600 rounded-md"
+                    />
+                    <span className="text-slate-700 font-medium">Carona Feminina</span>
+                  </label>
+                </div>
+              </div>
+
+              {/* 8. Chave PIX & Dados Bancários */}
+              <div className="space-y-3 pt-2 border-t border-slate-100">
+                <h4 className="text-[11px] font-bold text-indigo-700 uppercase tracking-wider flex items-center gap-1.5">
+                  <CreditCard className="w-3.5 h-3.5" />
+                  8. Chave PIX & Dados Bancários para Repasse
+                </h4>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 p-3 bg-slate-50 border border-slate-200 rounded-2xl">
+                  <div>
+                    <label className="text-[10px] font-bold text-slate-500 block mb-1">Chave PIX</label>
+                    <input
+                      type="text"
+                      placeholder="CPF, e-mail, telefone ou chave aleatória"
+                      value={editingUser.pixKey || ''}
+                      onChange={(e) => setEditingUser({ ...editingUser, pixKey: e.target.value })}
+                      className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs font-mono"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[10px] font-bold text-slate-500 block mb-1">Tipo da Chave</label>
+                    <select
+                      value={editingUser.pixKeyType || 'cpf'}
+                      onChange={(e) => setEditingUser({ ...editingUser, pixKeyType: e.target.value as any })}
+                      className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs bg-white"
+                    >
+                      <option value="cpf">CPF</option>
+                      <option value="email">E-mail</option>
+                      <option value="phone">Telefone</option>
+                      <option value="random">Chave Aleatória (EVP)</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-[10px] font-bold text-slate-500 block mb-1">Banco</label>
+                    <input
+                      type="text"
+                      placeholder="Ex: Nubank, Itaú, Banco do Brasil"
+                      value={editingUser.bankName || ''}
+                      onChange={(e) => setEditingUser({ ...editingUser, bankName: e.target.value })}
+                      className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs"
+                    />
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="text-[10px] font-bold text-slate-500 block mb-1">Agência</label>
+                      <input
+                        type="text"
+                        placeholder="Ex: 0001"
+                        value={editingUser.agency || ''}
+                        onChange={(e) => setEditingUser({ ...editingUser, agency: e.target.value })}
+                        className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs font-mono"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-[10px] font-bold text-slate-500 block mb-1">Conta Corrente</label>
+                      <input
+                        type="text"
+                        placeholder="Ex: 12345-6"
+                        value={editingUser.accountNumber || ''}
+                        onChange={(e) => setEditingUser({ ...editingUser, accountNumber: e.target.value })}
+                        className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs font-mono"
+                      />
+                    </div>
+                  </div>
+                </div>
+              </div>
             </div>
 
             {/* Modal Bottom Actions */}
-            <div className="flex items-center justify-between pt-4 border-t border-slate-100">
-              <button
-                type="button"
-                onClick={() => setEditingUser(null)}
-                className="px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl transition cursor-pointer"
-              >
-                Cancelar
-              </button>
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-4 border-t border-slate-100">
+              <div className="flex items-center gap-2 flex-wrap">
+                <button
+                  type="button"
+                  onClick={() => setEditingUser(null)}
+                  className="px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl transition cursor-pointer"
+                >
+                  Cancelar
+                </button>
+
+                {onStartSupportSession && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const target = { ...editingUser };
+                      setEditingUser(null);
+                      onStartSupportSession(target);
+                    }}
+                    className="px-3 py-2 bg-amber-500/10 hover:bg-amber-500/20 text-amber-900 border border-amber-300 font-bold text-xs rounded-xl transition flex items-center gap-1.5 cursor-pointer"
+                    title="Navegar como este usuário em sessão de suporte"
+                  >
+                    <LogIn className="w-3.5 h-3.5 text-amber-700" />
+                    <span>Modo Suporte</span>
+                  </button>
+                )}
+
+                {onOpenUserProfile && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const target = { ...editingUser };
+                      setEditingUser(null);
+                      onOpenUserProfile(target);
+                    }}
+                    className="px-3 py-2 bg-purple-50 hover:bg-purple-100 text-purple-900 border border-purple-200 font-bold text-xs rounded-xl transition flex items-center gap-1.5 cursor-pointer"
+                    title="Abrir configurações completas na Área do Usuário"
+                  >
+                    <Sliders className="w-3.5 h-3.5 text-purple-700" />
+                    <span>Abrir na Área do Usuário</span>
+                  </button>
+                )}
+              </div>
 
               <button
                 type="button"
@@ -1316,7 +1907,7 @@ export const SuperUserManagementView: React.FC<SuperUserManagementViewProps> = (
                     showToast('Erro ao salvar', String(err), 'error');
                   }
                 }}
-                className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-xl transition flex items-center space-x-1.5 shadow-xs cursor-pointer"
+                className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-xl transition flex items-center justify-center space-x-1.5 shadow-xs cursor-pointer"
               >
                 <Save className="w-4 h-4" />
                 <span>Salvar Alterações no Firestore</span>
@@ -1372,7 +1963,7 @@ export const SuperUserManagementView: React.FC<SuperUserManagementViewProps> = (
                     role,
                     isSuperUser: isSuper,
                     emailVerified: verified,
-                    saldo_caronas: isSuper ? 24 : 0,
+                    saldo_caronas: 0,
                     rating: 5.0,
                     totalRidesOffered: 0,
                     totalRidesTaken: 0,
@@ -1492,10 +2083,10 @@ export const SuperUserManagementView: React.FC<SuperUserManagementViewProps> = (
             <div className="flex items-center justify-between border-b border-slate-100 pb-3">
               <div className="flex items-center space-x-2.5">
                 <div className="p-2 bg-emerald-50 text-emerald-600 rounded-xl">
-                  <Coins className="w-5 h-5" />
+                  <CreditCard className="w-5 h-5" />
                 </div>
                 <div>
-                  <h3 className="text-sm font-bold text-slate-900">Ajuste de Saldo de Caronas</h3>
+                  <h3 className="text-sm font-bold text-slate-900">Ajuste de Saldo em Conta (R$)</h3>
                   <p className="text-xs text-slate-500">{balanceUser.name}</p>
                 </div>
               </div>
@@ -1508,13 +2099,19 @@ export const SuperUserManagementView: React.FC<SuperUserManagementViewProps> = (
               <div className="flex justify-between">
                 <span className="text-slate-500">Saldo Atual:</span>
                 <span className="font-bold font-mono text-slate-900">
-                  {balanceUser.saldo_caronas || 0} pontos (R$ {(((balanceUser.saldo_caronas || 0) * 6.5) + 39).toFixed(2)})
+                  R$ {((balanceUser.saldo_caronas || 0) * 6.5).toFixed(2)}
                 </span>
               </div>
               <div className="flex justify-between">
-                <span className="text-slate-500">Novo Saldo Previsto:</span>
-                <span className="font-bold font-mono text-indigo-600">
-                  {(balanceUser.saldo_caronas || 0) + balanceAdjustment} pontos (R$ {((((balanceUser.saldo_caronas || 0) + balanceAdjustment) * 6.5) + 39).toFixed(2)})
+                <span className="text-slate-500">Valor do Ajuste:</span>
+                <span className={`font-bold font-mono ${balanceAdjustment >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
+                  {balanceAdjustment >= 0 ? '+' : ''} R$ {(balanceAdjustment * 6.5).toFixed(2)}
+                </span>
+              </div>
+              <div className="flex justify-between pt-1 border-t border-slate-200/60">
+                <span className="text-slate-700 font-bold">Novo Saldo Previsto:</span>
+                <span className="font-bold font-mono text-indigo-600 text-sm">
+                  R$ {(((balanceUser.saldo_caronas || 0) + balanceAdjustment) * 6.5).toFixed(2)}
                 </span>
               </div>
             </div>
@@ -1522,42 +2119,53 @@ export const SuperUserManagementView: React.FC<SuperUserManagementViewProps> = (
             <div className="space-y-3 text-xs">
               <div>
                 <label className="text-[10px] font-bold text-slate-500 block mb-1">
-                  Crédito (+) ou Débito (-) em Pontos
+                  Ajuste de Valor (Crédito (+) ou Débito (-))
                 </label>
-                <div className="flex items-center space-x-2">
+                <div className="flex items-center space-x-1.5">
                   <button
                     type="button"
                     onClick={() => setBalanceAdjustment((prev) => prev - 5)}
-                    className="px-3 py-2 bg-rose-50 hover:bg-rose-100 text-rose-700 font-bold rounded-xl border border-rose-200 cursor-pointer"
+                    className="px-2 py-2 bg-rose-50 hover:bg-rose-100 text-rose-700 font-bold text-[11px] rounded-xl border border-rose-200 cursor-pointer transition active:scale-95"
+                    title="Debitar R$ 32,50"
                   >
-                    -5 pts
+                    - R$ 32,50
                   </button>
                   <button
                     type="button"
                     onClick={() => setBalanceAdjustment((prev) => prev - 1)}
-                    className="px-3 py-2 bg-rose-50 hover:bg-rose-100 text-rose-700 font-bold rounded-xl border border-rose-200 cursor-pointer"
+                    className="px-2 py-2 bg-rose-50 hover:bg-rose-100 text-rose-700 font-bold text-[11px] rounded-xl border border-rose-200 cursor-pointer transition active:scale-95"
+                    title="Debitar R$ 6,50"
                   >
-                    -1 pt
+                    - R$ 6,50
                   </button>
-                  <input
-                    type="number"
-                    value={balanceAdjustment}
-                    onChange={(e) => setBalanceAdjustment(parseInt(e.target.value) || 0)}
-                    className="flex-1 px-3 py-2 border border-slate-200 rounded-xl font-mono font-bold text-center text-sm"
-                  />
+                  <div className="flex-1 relative">
+                    <span className="absolute left-2.5 top-2 text-slate-400 font-mono text-xs font-bold">R$</span>
+                    <input
+                      type="number"
+                      step="6.50"
+                      value={Number((balanceAdjustment * 6.5).toFixed(2))}
+                      onChange={(e) => {
+                        const val = parseFloat(e.target.value) || 0;
+                        setBalanceAdjustment(Math.round((val / 6.5) * 100) / 100);
+                      }}
+                      className="w-full pl-8 pr-2 py-2 border border-slate-200 rounded-xl font-mono font-bold text-center text-xs focus:ring-2 focus:ring-indigo-500"
+                    />
+                  </div>
                   <button
                     type="button"
                     onClick={() => setBalanceAdjustment((prev) => prev + 1)}
-                    className="px-3 py-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 font-bold rounded-xl border border-emerald-200 cursor-pointer"
+                    className="px-2 py-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 font-bold text-[11px] rounded-xl border border-emerald-200 cursor-pointer transition active:scale-95"
+                    title="Creditar R$ 6,50"
                   >
-                    +1 pt
+                    + R$ 6,50
                   </button>
                   <button
                     type="button"
                     onClick={() => setBalanceAdjustment((prev) => prev + 5)}
-                    className="px-3 py-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 font-bold rounded-xl border border-emerald-200 cursor-pointer"
+                    className="px-2 py-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 font-bold text-[11px] rounded-xl border border-emerald-200 cursor-pointer transition active:scale-95"
+                    title="Creditar R$ 32,50"
                   >
-                    +5 pts
+                    + R$ 32,50
                   </button>
                 </div>
               </div>

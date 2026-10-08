@@ -1,7 +1,7 @@
-import React, { useState } from 'react';
-import { X, User as UserIcon, Car, MapPin, CreditCard, Sparkles, Check, Home, Shield, Phone, Navigation, Loader2, Plus, Trash2, CheckCircle2, AlertTriangle } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { X, User as UserIcon, Car, MapPin, CreditCard, Sparkles, Check, Home, Shield, ShieldAlert, Phone, Navigation, Loader2, Plus, Trash2, CheckCircle2, AlertTriangle, AlertCircle } from 'lucide-react';
 import { User, GeoLocation, Vehicle, getUserVehicles } from '../types';
-import { updateFirestoreUserProfile, deleteMyAccount } from '../lib/firebase';
+import { updateFirestoreUserProfile, deleteMyAccount, saveUserSession } from '../lib/firebase';
 import { LocationPickerModal } from './LocationPickerModal';
 import { getCurrentGPSPosition, reverseGeocode } from '../lib/geo';
 
@@ -159,6 +159,7 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
     setSaving(true);
+    setErrorMsg(null);
 
     try {
       const residentialLocation: GeoLocation = {
@@ -177,24 +178,32 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
             name: customMeetingName || 'Ponto de Encontro Preferencial',
           };
 
-      const validVehicles = hasVehicle 
+      const validVehicles: Vehicle[] = hasVehicle 
         ? vehiclesList
-            .filter((v) => v.model.trim().length > 0)
+            .filter((v) => v.model && v.model.trim().length > 0)
             .map((v, idx) => ({
-              ...v,
+              id: v.id || `veh-${Date.now()}-${idx}`,
               model: v.model.trim(),
               plate: (v.plate || '').trim().toUpperCase() || 'BRA2026',
               color: (v.color || '').trim() || 'Prata',
+              category: v.category || 'sedan',
+              year: v.year || '2023',
+              availableSeats: Number(v.availableSeats) || 4,
               isPrimary: idx === selectedPrimaryIndex,
             }))
         : [];
 
-      const primaryVehicle = validVehicles.find((v) => v.isPrimary) || validVehicles[0];
+      // If vehicles exist but none is marked primary, make first primary
+      if (validVehicles.length > 0 && !validVehicles.some((v) => v.isPrimary)) {
+        validVehicles[0].isPrimary = true;
+      }
+
+      const primaryVehicle = validVehicles.find((v) => v.isPrimary) || (validVehicles.length > 0 ? validVehicles[0] : null);
 
       const updatedUser: User = {
         ...currentUser,
-        name: name.trim(),
-        email: email.trim(),
+        name: name.trim() || currentUser.name,
+        email: email.trim() || currentUser.email,
         phone: phone.trim(),
         rolePreference: 'both',
         residentialAddress: residentialLocation,
@@ -203,20 +212,22 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
         pixKey: pixKey.trim(),
         agency: agency.trim(),
         accountNumber: accountNumber.trim(),
-        vehicle: primaryVehicle,
+        vehicle: primaryVehicle || undefined,
         vehicles: validVehicles,
       };
 
-      // Write directly to Cloud Firestore
+      // Write directly to Cloud Firestore with merge
       await updateFirestoreUserProfile(currentUser.id, updatedUser);
+      saveUserSession(updatedUser);
       onUserUpdated(updatedUser);
       setSuccessMsg(true);
       setTimeout(() => {
         setSuccessMsg(false);
         onClose();
-      }, 1200);
-    } catch (err) {
+      }, 1000);
+    } catch (err: any) {
       console.error('Error saving user profile to Firestore:', err);
+      setErrorMsg(err?.message || 'Falha ao salvar dados no Firestore. Tente novamente.');
     } finally {
       setSaving(false);
     }
@@ -234,7 +245,7 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
             </div>
             <div>
               <h3 className="font-display font-bold text-lg text-slate-900">Meu Perfil do Usuário</h3>
-              <p className="text-xs text-slate-500">Dados pessoais, endereço residencial e preferências de embarque</p>
+              <p className="text-xs text-slate-500">Dados pessoais, endereço padrão e preferências de embarque</p>
             </div>
           </div>
 
@@ -293,18 +304,31 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
             </div>
           </div>
 
-          {/* Endereço Residencial e Ponto de Encontro */}
+          {/* Endereço Padrão e Ponto de Encontro */}
           <div className="bg-slate-50 p-4 rounded-2xl border border-slate-200 space-y-3.5">
             <div className="flex items-center justify-between">
               <span className="font-bold text-xs text-slate-900 flex items-center gap-1.5">
                 <Home className="w-4 h-4 text-indigo-600" />
-                2. Endereço Residencial & Ponto de Encontro
+                2. Endereço Padrão & Ponto de Encontro
               </span>
+            </div>
+
+            {/* Dica de Segurança / Privacidade de Endereço */}
+            <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 flex items-start gap-2.5 text-xs text-amber-900">
+              <ShieldAlert className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+              <div className="space-y-0.5">
+                <p className="font-bold text-amber-950">
+                  Dica de Segurança: Não informe o número exato da sua residência
+                </p>
+                <p className="text-amber-800 text-[11px] leading-relaxed">
+                  Por motivos de segurança, recomendamos não colocar seu endereço residencial exato (como número de casa ou apto). Sugerimos informar um endereço próximo de um ponto de referência (ex: comércio, praça, estação) ou que identifique no mínimo o seu bairro.
+                </p>
+              </div>
             </div>
 
             <div>
               <div className="flex items-center justify-between mb-1 flex-wrap gap-1">
-                <label className="block text-slate-700 font-semibold">Endereço Residencial:</label>
+                <label className="block text-slate-700 font-semibold">Endereço Padrão (Ponto de Referência ou Bairro):</label>
                 <div className="flex items-center space-x-1.5 text-[10px]">
                   <button
                     type="button"
@@ -333,7 +357,7 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
                   required
                   value={resAddress}
                   onChange={(e) => setResAddress(e.target.value)}
-                  placeholder="Ex: Rua Fradique Coutinho, 1200 - Pinheiros, São Paulo - SP"
+                  placeholder="Ex: Próximo à Praça Panamericana - Pinheiros, São Paulo - SP"
                   className="w-full bg-white border border-slate-300 rounded-xl px-3.5 py-2 pr-10 text-slate-900 focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-600"
                 />
                 <button
@@ -347,7 +371,7 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
               </div>
             </div>
 
-            {/* Checkbox: Usar residencial como ponto de encontro */}
+            {/* Checkbox: Usar padrão como ponto de encontro */}
             <div className="bg-white p-3 rounded-xl border border-slate-200 space-y-1">
               <label className="flex items-start space-x-2.5 cursor-pointer">
                 <input
@@ -358,10 +382,10 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
                 />
                 <div>
                   <span className="font-semibold text-slate-900 text-xs">
-                    Incluir meu endereço residencial como ponto de encontro padrão
+                    Incluir meu endereço padrão como ponto de encontro
                   </span>
                   <p className="text-[11px] text-slate-500">
-                    Se marcado, as caronas utilizarão sua casa como ponto inicial de embarque.
+                    Se marcado, as caronas utilizarão esta localização como ponto inicial de embarque.
                   </p>
                 </div>
               </label>
@@ -685,7 +709,7 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
         onClose={() => setMapPickerTarget(null)}
         title={
           mapPickerTarget === 'residential'
-            ? 'Apontar Endereço Residencial no Mapa'
+            ? 'Apontar Endereço Padrão no Mapa'
             : 'Apontar Ponto de Encontro / Embarque no Mapa'
         }
         initialAddress={
@@ -697,6 +721,7 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
         initialLng={
           mapPickerTarget === 'residential' ? resLng : customMeetingLng
         }
+        currentUser={currentUser}
         onSelectLocation={(selected) => {
           if (mapPickerTarget === 'residential') {
             setResAddress(selected.address);

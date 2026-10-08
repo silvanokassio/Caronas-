@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { 
   User as UserIcon, 
   Car, 
@@ -32,6 +32,7 @@ import {
   Camera,
   Compass,
   ArrowRight,
+  ArrowLeft,
   LogOut,
   LogIn,
   Repeat,
@@ -40,25 +41,51 @@ import {
   Plus,
   Trash2,
   Send,
-  KeyRound
+  KeyRound,
+  Search,
+  X,
+  ChevronDown,
+  UserCheck,
+  ExternalLink,
+  Smartphone,
+  Download,
+  Monitor,
+  RefreshCw,
+  AlertTriangle,
+  MailCheck,
+  MailX
 } from 'lucide-react';
 import { User, GeoLocation, UserPreferences, Vehicle, isSuperUser, getUserVehicles, Routine } from '../types';
-import { updateFirestoreUserProfile, saveFirestoreRoutine, deleteMyAccount, deleteFirestoreUser } from '../lib/firebase';
+import { updateFirestoreUserProfile, saveFirestoreRoutine, deleteMyAccount, deleteFirestoreUser, saveUserSession } from '../lib/firebase';
 import { LocationPickerModal } from './LocationPickerModal';
 import { getCurrentGPSPosition, reverseGeocode } from '../lib/geo';
-import { sendEmailConfirmation, checkEmailHealth, requestEmailVerificationCode, verifyEmailCode, checkEmailValidationStatus } from '../lib/emailClient';
+import { 
+  sendEmailConfirmation, 
+  checkEmailHealth, 
+  requestEmailVerificationCode, 
+  verifyEmailCode, 
+  checkEmailValidationStatus,
+  fetchEmailDeliveryLogs,
+  testEmailDelivery,
+  EmailDeliveryRecord,
+  getHumanReadableEmailType
+} from '../lib/emailClient';
+import { PWAInstallCard } from './PWAInstallCard';
 
-export type SectionTab = 'identity' | 'routines' | 'commute' | 'locations' | 'vehicle' | 'financial' | 'privacy' | 'emails' | 'security';
+export type SectionTab = 'identity' | 'routines' | 'commute' | 'locations' | 'vehicle' | 'financial' | 'privacy' | 'emails' | 'security' | 'app_install';
 
 interface UserAreaViewProps {
   currentUser: User | null;
   allUsers?: User[];
+  isSuperAdmin?: boolean;
   onUserUpdated: (updated: User) => void;
   onUserDeleted?: () => void;
   onOpenAuth?: (mode?: 'login' | 'register') => void;
-  onNavigateToTab?: (tab: 'rides' | 'groups' | 'gamification' | 'ai_routes' | 'architecture' | 'user_area') => void;
+  onNavigateToTab?: (tab: 'rides' | 'routines' | 'groups' | 'gamification' | 'ai_routes' | 'architecture' | 'user_area' | 'superuser_management') => void;
   onUpdateRoutine?: (updatedRoutine: Routine, updatedMeetingPoint: GeoLocation) => void;
   initialSection?: SectionTab;
+  initialTargetUserId?: string;
+  onStartSupportSession?: (targetUser: User) => void;
 }
 
 const PRESET_AVATARS = [
@@ -82,12 +109,15 @@ const PRESET_MEETING_POINTS: GeoLocation[] = [
 export const UserAreaView: React.FC<UserAreaViewProps> = ({
   currentUser,
   allUsers = [],
+  isSuperAdmin = false,
   onUserUpdated,
   onUserDeleted,
   onOpenAuth,
   onNavigateToTab,
   onUpdateRoutine,
   initialSection = 'identity',
+  initialTargetUserId,
+  onStartSupportSession,
 }) => {
   if (!currentUser) {
     return (
@@ -120,44 +150,58 @@ export const UserAreaView: React.FC<UserAreaViewProps> = ({
     );
   }
 
-  const isSuper = isSuperUser(currentUser);
+  const isSuper = isSuperUser(currentUser) || Boolean(isSuperAdmin);
+
+  // Selected User for Support / Inspection
+  const [selectedUserId, setSelectedUserId] = useState<string>(
+    initialTargetUserId || currentUser.id
+  );
+  const [userSearchTerm, setUserSearchTerm] = useState('');
+  const [showUserDropdown, setShowUserDropdown] = useState(false);
+
+  // Derive active target user
+  const activeUser = (isSuper && selectedUserId && allUsers && allUsers.length > 0
+    ? allUsers.find((u) => u.id === selectedUserId)
+    : null) || currentUser;
+
+  const isAssistingOtherUser = isSuper && activeUser.id !== currentUser.id;
 
   // Active sub-tab
   const [activeSection, setActiveSection] = useState<SectionTab>(initialSection);
 
   // Form State - Identity & Personal
-  const [name, setName] = useState(currentUser.name || '');
-  const [email, setEmail] = useState(currentUser.email || '');
-  const [phone, setPhone] = useState(currentUser.phone || '');
-  const [cpf, setCpf] = useState(currentUser.cpf || '');
-  const [institutionName, setInstitutionName] = useState(currentUser.institutionName || '');
-  const [bio, setBio] = useState(currentUser.bio || '');
-  const [avatar, setAvatar] = useState(currentUser.avatar || PRESET_AVATARS[0]);
-  const [gender, setGender] = useState<'female' | 'male' | 'other' | 'prefer_not_say'>(currentUser.gender || 'prefer_not_say');
-  const [rolePreference, setRolePreference] = useState<'both' | 'driver' | 'passenger'>(currentUser.rolePreference || 'both');
+  const [name, setName] = useState(activeUser.name || '');
+  const [email, setEmail] = useState(activeUser.email || '');
+  const [phone, setPhone] = useState(activeUser.phone || '');
+  const [cpf, setCpf] = useState(activeUser.cpf || '');
+  const [institutionName, setInstitutionName] = useState(activeUser.institutionName || '');
+  const [bio, setBio] = useState(activeUser.bio || '');
+  const [avatar, setAvatar] = useState(activeUser.avatar || PRESET_AVATARS[0]);
+  const [gender, setGender] = useState<'female' | 'male' | 'other' | 'prefer_not_say'>(activeUser.gender || 'prefer_not_say');
+  const [rolePreference, setRolePreference] = useState<'both' | 'driver' | 'passenger'>(activeUser.rolePreference || 'both');
 
   // Form State - Routine & Fixed Commutes (Configurações da Conta)
-  const [routineTitle, setRoutineTitle] = useState(currentUser.routine?.title || 'Ida & Retorno Diário');
+  const [routineTitle, setRoutineTitle] = useState(activeUser.routine?.title || 'Ida & Retorno Diário');
   const [routineOriginAddress, setRoutineOriginAddress] = useState(
-    currentUser.routine?.origin?.address || currentUser.residentialAddress?.address || 'Rua Fradique Coutinho, 1200 - Pinheiros, São Paulo - SP'
+    activeUser.routine?.origin?.address || activeUser.residentialAddress?.address || 'Rua Fradique Coutinho, 1200 - Pinheiros, São Paulo - SP'
   );
-  const [routineOriginLat, setRoutineOriginLat] = useState<number>(currentUser.routine?.origin?.lat || currentUser.residentialAddress?.lat || -23.5539);
-  const [routineOriginLng, setRoutineOriginLng] = useState<number>(currentUser.routine?.origin?.lng || currentUser.residentialAddress?.lng || -46.6896);
+  const [routineOriginLat, setRoutineOriginLat] = useState<number>(activeUser.routine?.origin?.lat || activeUser.residentialAddress?.lat || -23.5539);
+  const [routineOriginLng, setRoutineOriginLng] = useState<number>(activeUser.routine?.origin?.lng || activeUser.residentialAddress?.lng || -46.6896);
 
   const [routineDestAddress, setRoutineDestAddress] = useState(
-    currentUser.routine?.destination?.address || 'Av. Prof. Luciano Gualberto, 380 - Butantã, São Paulo - SP'
+    activeUser.routine?.destination?.address || 'Av. Prof. Luciano Gualberto, 380 - Butantã, São Paulo - SP'
   );
-  const [routineDestLat, setRoutineDestLat] = useState<number>(currentUser.routine?.destination?.lat || -23.5574);
-  const [routineDestLng, setRoutineDestLng] = useState<number>(currentUser.routine?.destination?.lng || -46.7314);
+  const [routineDestLat, setRoutineDestLat] = useState<number>(activeUser.routine?.destination?.lat || -23.5574);
+  const [routineDestLng, setRoutineDestLng] = useState<number>(activeUser.routine?.destination?.lng || -46.7314);
 
-  const [routineDepartureTime, setRoutineDepartureTime] = useState(currentUser.routine?.departureTime || '07:30');
-  const [routineDefaultSeats, setRoutineDefaultSeats] = useState<number>(currentUser.routine?.defaultSeats || 3);
-  const [routineDefaultPrice, setRoutineDefaultPrice] = useState<number>(currentUser.routine?.defaultPrice || 6.50);
+  const [routineDepartureTime, setRoutineDepartureTime] = useState(activeUser.routine?.departureTime || '07:30');
+  const [routineDefaultSeats, setRoutineDefaultSeats] = useState<number>(activeUser.routine?.defaultSeats || 3);
+  const [routineDefaultPrice, setRoutineDefaultPrice] = useState<number>(activeUser.routine?.defaultPrice || 6.50);
   const [routineDays, setRoutineDays] = useState<string[]>(
-    currentUser.routine?.daysOfWeek || ['Seg', 'Ter', 'Qua', 'Qui', 'Sex']
+    activeUser.routine?.daysOfWeek || ['Seg', 'Ter', 'Qua', 'Qui', 'Sex']
   );
   const [routineMeetingPoint, setRoutineMeetingPoint] = useState<GeoLocation>(
-    currentUser.ponto_encontro_default || PRESET_MEETING_POINTS[0]
+    activeUser.ponto_encontro_default || PRESET_MEETING_POINTS[0]
   );
   const [routineSavedSuccess, setRoutineSavedSuccess] = useState(false);
 
@@ -172,65 +216,65 @@ export const UserAreaView: React.FC<UserAreaViewProps> = ({
   };
 
   // Form State - Commute & Travel Preferences
-  const [allowMusic, setAllowMusic] = useState<boolean>(currentUser.preferences?.allowMusic ?? true);
-  const [musicStyle, setMusicStyle] = useState<string>(currentUser.preferences?.musicStyle || 'MPB, Pop & Podcasts');
-  const [allowPets, setAllowPets] = useState<boolean>(currentUser.preferences?.allowPets ?? false);
-  const [airConditioning, setAirConditioning] = useState<boolean>(currentUser.preferences?.airConditioning ?? true);
-  const [conversationStyle, setConversationStyle] = useState<'talkative' | 'quiet' | 'flexible'>(currentUser.preferences?.conversationStyle || 'flexible');
-  const [womenOnlyRides, setWomenOnlyRides] = useState<boolean>(currentUser.preferences?.womenOnlyRides ?? false);
-  const [luggageSize, setLuggageSize] = useState<'small' | 'medium' | 'large'>(currentUser.preferences?.luggageSize || 'medium');
-  const [punctualityTolerance, setPunctualityTolerance] = useState<number>(currentUser.preferences?.punctualityToleranceMinutes ?? 5);
-  const [maxDetourMeters, setMaxDetourMeters] = useState<number>(currentUser.preferences?.maxDetourDistanceMeters ?? 1000);
+  const [allowMusic, setAllowMusic] = useState<boolean>(activeUser.preferences?.allowMusic ?? true);
+  const [musicStyle, setMusicStyle] = useState<string>(activeUser.preferences?.musicStyle || 'MPB, Pop & Podcasts');
+  const [allowPets, setAllowPets] = useState<boolean>(activeUser.preferences?.allowPets ?? false);
+  const [airConditioning, setAirConditioning] = useState<boolean>(activeUser.preferences?.airConditioning ?? true);
+  const [conversationStyle, setConversationStyle] = useState<'talkative' | 'quiet' | 'flexible'>(activeUser.preferences?.conversationStyle || 'flexible');
+  const [womenOnlyRides, setWomenOnlyRides] = useState<boolean>(activeUser.preferences?.womenOnlyRides ?? false);
+  const [luggageSize, setLuggageSize] = useState<'small' | 'medium' | 'large'>(activeUser.preferences?.luggageSize || 'medium');
+  const [punctualityTolerance, setPunctualityTolerance] = useState<number>(activeUser.preferences?.punctualityToleranceMinutes ?? 5);
+  const [maxDetourMeters, setMaxDetourMeters] = useState<number>(activeUser.preferences?.maxDetourDistanceMeters ?? 1000);
 
   // Form State - Addresses & Meeting Points
   const [resAddress, setResAddress] = useState(
-    currentUser.residentialAddress?.address || currentUser.ponto_encontro_default?.address || 'Rua Fradique Coutinho, 1200 - Pinheiros, São Paulo - SP'
+    activeUser.residentialAddress?.address || activeUser.ponto_encontro_default?.address || 'Rua Fradique Coutinho, 1200 - Pinheiros, São Paulo - SP'
   );
-  const [resLat, setResLat] = useState<number>(currentUser.residentialAddress?.lat || -23.5539);
-  const [resLng, setResLng] = useState<number>(currentUser.residentialAddress?.lng || -46.6896);
+  const [resLat, setResLat] = useState<number>(activeUser.residentialAddress?.lat || -23.5539);
+  const [resLng, setResLng] = useState<number>(activeUser.residentialAddress?.lng || -46.6896);
 
-  const [useResAsMeeting, setUseResAsMeeting] = useState<boolean>(currentUser.useResidentialAsMeetingPoint ?? false);
+  const [useResAsMeeting, setUseResAsMeeting] = useState<boolean>(activeUser.useResidentialAsMeetingPoint ?? false);
   const [customMeetingAddress, setCustomMeetingAddress] = useState(
-    currentUser.ponto_encontro_default?.address || 'Metrô Butantã - Saída Av. Vital Brasil'
+    activeUser.ponto_encontro_default?.address || 'Metrô Butantã - Saída Av. Vital Brasil'
   );
-  const [customMeetingLat, setCustomMeetingLat] = useState<number>(currentUser.ponto_encontro_default?.lat || -23.5719);
-  const [customMeetingLng, setCustomMeetingLng] = useState<number>(currentUser.ponto_encontro_default?.lng || -46.7082);
+  const [customMeetingLat, setCustomMeetingLat] = useState<number>(activeUser.ponto_encontro_default?.lat || -23.5719);
+  const [customMeetingLng, setCustomMeetingLng] = useState<number>(activeUser.ponto_encontro_default?.lng || -46.7082);
   const [customMeetingName, setCustomMeetingName] = useState(
-    currentUser.ponto_encontro_default?.name || 'Estação Butantã (Linha 4-Amarela)'
+    activeUser.ponto_encontro_default?.name || 'Estação Butantã (Linha 4-Amarela)'
   );
 
   // Form State - Vehicle & Driver (Multiple Vehicles Garage)
-  const initialVehicles = getUserVehicles(currentUser);
+  const initialVehicles = getUserVehicles(activeUser);
   const [vehiclesList, setVehiclesList] = useState<Vehicle[]>(
     initialVehicles.length > 0
       ? initialVehicles
-      : currentUser.vehicle?.model
-      ? [{ ...currentUser.vehicle, id: `veh-${Date.now()}`, isPrimary: true }]
+      : activeUser.vehicle?.model
+      ? [{ ...activeUser.vehicle, id: `veh-${Date.now()}`, isPrimary: true }]
       : []
   );
   const [hasVehicle, setHasVehicle] = useState(
-    initialVehicles.length > 0 || !!currentUser.vehicle?.model
+    initialVehicles.length > 0 || !!activeUser.vehicle?.model
   );
 
   // Form State - Financial & PIX
-  const [pixKey, setPixKey] = useState(currentUser.pixKey || '');
-  const [pixKeyType, setPixKeyType] = useState<'email' | 'phone' | 'cpf' | 'random'>(currentUser.pixKeyType || 'email');
-  const [bankName, setBankName] = useState(currentUser.bankName || 'Nubank / Banco do Brasil');
-  const [agency, setAgency] = useState(currentUser.agency || '0001');
-  const [accountNumber, setAccountNumber] = useState(currentUser.accountNumber || '');
+  const [pixKey, setPixKey] = useState(activeUser.pixKey || '');
+  const [pixKeyType, setPixKeyType] = useState<'email' | 'phone' | 'cpf' | 'random'>(activeUser.pixKeyType || 'email');
+  const [bankName, setBankName] = useState(activeUser.bankName || 'Nubank / Banco do Brasil');
+  const [agency, setAgency] = useState(activeUser.agency || '0001');
+  const [accountNumber, setAccountNumber] = useState(activeUser.accountNumber || '');
 
   // Form State - Privacy & Alerts
   const [profileVisibility, setProfileVisibility] = useState<'public' | 'groups_only' | 'verified_only'>(
-    currentUser.preferences?.profileVisibility || 'public'
+    activeUser.preferences?.profileVisibility || 'public'
   );
   const [showPhoneToPassengers, setShowPhoneToPassengers] = useState<boolean>(
-    currentUser.preferences?.showPhoneToPassengers ?? true
+    activeUser.preferences?.showPhoneToPassengers ?? true
   );
   const [notifyNewRidesInGroups, setNotifyNewRidesInGroups] = useState<boolean>(
-    currentUser.preferences?.notifyNewRidesInGroups ?? true
+    activeUser.preferences?.notifyNewRidesInGroups ?? true
   );
   const [notifyDriverDeparted, setNotifyDriverDeparted] = useState<boolean>(
-    currentUser.preferences?.notifyDriverDeparted ?? true
+    activeUser.preferences?.notifyDriverDeparted ?? true
   );
 
   // UI state
@@ -336,17 +380,21 @@ export const UserAreaView: React.FC<UserAreaViewProps> = ({
         defaultPrice: Number(routineDefaultPrice) || 6.50,
       };
 
-      await saveFirestoreRoutine(currentUser.id, updatedRoutine);
-      await updateFirestoreUserProfile(currentUser.id, {
+      await saveFirestoreRoutine(activeUser.id, updatedRoutine);
+      await updateFirestoreUserProfile(activeUser.id, {
         routine: updatedRoutine,
         ponto_encontro_default: routineMeetingPoint,
       });
 
       const updatedUser: User = {
-        ...currentUser,
+        ...activeUser,
         routine: updatedRoutine,
         ponto_encontro_default: routineMeetingPoint,
       };
+
+      if (activeUser.id === currentUser.id) {
+        saveUserSession(updatedUser);
+      }
 
       onUserUpdated(updatedUser);
       if (onUpdateRoutine) {
@@ -367,6 +415,7 @@ export const UserAreaView: React.FC<UserAreaViewProps> = ({
   const [emailSending, setEmailSending] = useState(false);
   const [emailSendResult, setEmailSendResult] = useState<{ success: boolean; message: string } | null>(null);
   const [smtpStatus, setSmtpStatus] = useState<{ configured: boolean; user?: string; host?: string } | null>(null);
+  const [testEmailTemplate, setTestEmailTemplate] = useState<'RIDE_CANCELLED' | 'RIDE_CREATED' | 'WELCOME'>('RIDE_CANCELLED');
 
   // Email Validation Workflow (Methodology contato@apponline.ia.br)
   const [isEmailVerified, setIsEmailVerified] = useState<boolean>(
@@ -377,6 +426,75 @@ export const UserAreaView: React.FC<UserAreaViewProps> = ({
   const [isSubmittingVerification, setIsSubmittingVerification] = useState<boolean>(false);
   const [verificationFeedback, setVerificationFeedback] = useState<{ type: 'success' | 'error' | 'info'; text: string } | null>(null);
   const [codeSentAt, setCodeSentAt] = useState<string | null>(null);
+
+  // Delivery logs & Monitoring state
+  const [deliveryLogs, setDeliveryLogs] = useState<EmailDeliveryRecord[]>([]);
+  const [deliverySummary, setDeliverySummary] = useState<{ total: number; successful: number; failed: number; deliveryRate: number }>({
+    total: 0,
+    successful: 0,
+    failed: 0,
+    deliveryRate: 100,
+  });
+  const [loadingDeliveryLogs, setLoadingDeliveryLogs] = useState(false);
+  const [diagnosticSending, setDiagnosticSending] = useState(false);
+  const [diagnosticResult, setDiagnosticResult] = useState<{ success: boolean; message: string } | null>(null);
+
+  const loadDeliveryAudit = useCallback(async () => {
+    const targetEmail = (email || currentUser?.email || '').trim();
+    if (!targetEmail || !targetEmail.includes('@')) return;
+    setLoadingDeliveryLogs(true);
+    try {
+      const res = await fetchEmailDeliveryLogs(targetEmail);
+      if (res.success) {
+        setDeliveryLogs(res.logs || []);
+        setDeliverySummary(res.summary || { total: 0, successful: 0, failed: 0, deliveryRate: 100 });
+      }
+    } catch {
+      // ignore
+    } finally {
+      setLoadingDeliveryLogs(false);
+    }
+  }, [email, currentUser?.email]);
+
+  useEffect(() => {
+    if (activeSection === 'emails') {
+      loadDeliveryAudit();
+    }
+  }, [activeSection, loadDeliveryAudit]);
+
+  const handleRunDiagnosticTest = async () => {
+    const targetEmail = (email || currentUser?.email || '').trim();
+    if (!targetEmail || !targetEmail.includes('@')) return;
+    setDiagnosticSending(true);
+    setDiagnosticResult(null);
+    try {
+      const res = await testEmailDelivery({ 
+        email: targetEmail, 
+        userName: name || currentUser.name 
+      });
+      if (res.success) {
+        setDiagnosticResult({
+          success: true,
+          message: res.simulated 
+            ? 'Disparo de teste simulado com sucesso no servidor.'
+            : 'E-mail de teste enviado com sucesso para sua caixa de entrada!'
+        });
+      } else {
+        setDiagnosticResult({
+          success: false,
+          message: res.error || 'Falha ao enviar e-mail de teste de notificação.'
+        });
+      }
+      await loadDeliveryAudit();
+    } catch (err: any) {
+      setDiagnosticResult({
+        success: false,
+        message: err.message || 'Erro ao conectar ao serviço de diagnóstico de e-mail.'
+      });
+    } finally {
+      setDiagnosticSending(false);
+    }
+  };
 
   // Check validation status against server on mount
   useEffect(() => {
@@ -483,33 +601,95 @@ export const UserAreaView: React.FC<UserAreaViewProps> = ({
       .catch(() => {});
   }, []);
 
-  // Re-sync if currentUser prop changes
+  // Guarded sync: Sync all fields whenever activeUser ID switches
+  const lastSyncedUserIdRef = useRef<string | null>(null);
   useEffect(() => {
-    setName(currentUser.name || '');
-    setEmail(currentUser.email || '');
-    setPhone(currentUser.phone || '');
-    setCpf(currentUser.cpf || '');
-    setInstitutionName(currentUser.institutionName || '');
-    setBio(currentUser.bio || '');
-    setAvatar(currentUser.avatar || PRESET_AVATARS[0]);
-    setRolePreference(currentUser.rolePreference || 'both');
-    setPixKey(currentUser.pixKey || '');
-    setAgency(currentUser.agency || '0001');
-    setAccountNumber(currentUser.accountNumber || '');
-    setBankName(currentUser.bankName || 'Nubank / Banco do Brasil');
+    if (!activeUser) return;
+    if (lastSyncedUserIdRef.current !== activeUser.id) {
+      lastSyncedUserIdRef.current = activeUser.id;
+      setName(activeUser.name || '');
+      setEmail(activeUser.email || '');
+      setPhone(activeUser.phone || '');
+      setCpf(activeUser.cpf || '');
+      setInstitutionName(activeUser.institutionName || '');
+      setBio(activeUser.bio || '');
+      setAvatar(activeUser.avatar || PRESET_AVATARS[0]);
+      setGender(activeUser.gender || 'prefer_not_say');
+      setRolePreference(activeUser.rolePreference || 'both');
+      setPixKey(activeUser.pixKey || '');
+      setPixKeyType(activeUser.pixKeyType || 'email');
+      setAgency(activeUser.agency || '0001');
+      setAccountNumber(activeUser.accountNumber || '');
+      setBankName(activeUser.bankName || 'Nubank / Banco do Brasil');
 
-    const vList = getUserVehicles(currentUser);
-    if (vList.length > 0) {
-      setVehiclesList(vList);
-      setHasVehicle(true);
-    } else if (currentUser.vehicle?.model) {
-      setVehiclesList([{ ...currentUser.vehicle, id: `veh-${Date.now()}`, isPrimary: true }]);
-      setHasVehicle(true);
-    } else {
-      setVehiclesList([]);
-      setHasVehicle(false);
+      // Routine sync
+      setRoutineTitle(activeUser.routine?.title || 'Ida & Retorno Diário');
+      setRoutineOriginAddress(
+        activeUser.routine?.origin?.address || activeUser.residentialAddress?.address || 'Rua Fradique Coutinho, 1200 - Pinheiros, São Paulo - SP'
+      );
+      setRoutineOriginLat(activeUser.routine?.origin?.lat || activeUser.residentialAddress?.lat || -23.5539);
+      setRoutineOriginLng(activeUser.routine?.origin?.lng || activeUser.residentialAddress?.lng || -46.6896);
+      setRoutineDestAddress(
+        activeUser.routine?.destination?.address || 'Av. Prof. Luciano Gualberto, 380 - Butantã, São Paulo - SP'
+      );
+      setRoutineDestLat(activeUser.routine?.destination?.lat || -23.5574);
+      setRoutineDestLng(activeUser.routine?.destination?.lng || -46.7314);
+      setRoutineDepartureTime(activeUser.routine?.departureTime || '07:30');
+      setRoutineDefaultSeats(activeUser.routine?.defaultSeats || 3);
+      setRoutineDefaultPrice(activeUser.routine?.defaultPrice || 6.50);
+      setRoutineDays(activeUser.routine?.daysOfWeek || ['Seg', 'Ter', 'Qua', 'Qui', 'Sex']);
+      setRoutineMeetingPoint(activeUser.ponto_encontro_default || PRESET_MEETING_POINTS[0]);
+
+      // Preferences sync
+      setAllowMusic(activeUser.preferences?.allowMusic ?? true);
+      setMusicStyle(activeUser.preferences?.musicStyle || 'MPB, Pop & Podcasts');
+      setAllowPets(activeUser.preferences?.allowPets ?? false);
+      setAirConditioning(activeUser.preferences?.airConditioning ?? true);
+      setConversationStyle(activeUser.preferences?.conversationStyle || 'flexible');
+      setWomenOnlyRides(activeUser.preferences?.womenOnlyRides ?? false);
+      setLuggageSize(activeUser.preferences?.luggageSize || 'medium');
+      setPunctualityTolerance(activeUser.preferences?.punctualityToleranceMinutes ?? 5);
+      setMaxDetourMeters(activeUser.preferences?.maxDetourDistanceMeters ?? 1000);
+
+      // Locations sync
+      setResAddress(
+        activeUser.residentialAddress?.address || activeUser.ponto_encontro_default?.address || 'Rua Fradique Coutinho, 1200 - Pinheiros, São Paulo - SP'
+      );
+      setResLat(activeUser.residentialAddress?.lat || -23.5539);
+      setResLng(activeUser.residentialAddress?.lng || -46.6896);
+      setUseResAsMeeting(activeUser.useResidentialAsMeetingPoint ?? false);
+      setCustomMeetingAddress(
+        activeUser.ponto_encontro_default?.address || 'Metrô Butantã - Saída Av. Vital Brasil'
+      );
+      setCustomMeetingLat(activeUser.ponto_encontro_default?.lat || -23.5719);
+      setCustomMeetingLng(activeUser.ponto_encontro_default?.lng || -46.7082);
+      setCustomMeetingName(
+        activeUser.ponto_encontro_default?.name || 'Estação Butantã (Linha 4-Amarela)'
+      );
+
+      // Vehicles sync
+      const vList = getUserVehicles(activeUser);
+      if (vList.length > 0) {
+        setVehiclesList(vList);
+        setHasVehicle(true);
+      } else if (activeUser.vehicle?.model) {
+        setVehiclesList([{ ...activeUser.vehicle, id: `veh-${Date.now()}`, isPrimary: true }]);
+        setHasVehicle(true);
+      } else {
+        setVehiclesList([]);
+        setHasVehicle(false);
+      }
+
+      // Privacy sync
+      setProfileVisibility(activeUser.preferences?.profileVisibility || 'public');
+      setShowPhoneToPassengers(activeUser.preferences?.showPhoneToPassengers ?? true);
+      setNotifyNewRidesInGroups(activeUser.preferences?.notifyNewRidesInGroups ?? true);
+      setNotifyDriverDeparted(activeUser.preferences?.notifyDriverDeparted ?? true);
+
+      // Email verified
+      setIsEmailVerified(Boolean(activeUser.emailVerified || (activeUser.email && activeUser.email.toLowerCase() === 'silvano.kassio@gmail.com')));
     }
-  }, [currentUser]);
+  }, [activeUser?.id]);
 
   // GPS Auto-locate
   const handleQuickGPS = async (target: 'residential' | 'meeting') => {
@@ -595,10 +775,10 @@ export const UserAreaView: React.FC<UserAreaViewProps> = ({
         cleanVehicles[0].isPrimary = true;
       }
 
-      const primaryVehicle = cleanVehicles.find((v) => v.isPrimary) || cleanVehicles[0] || undefined;
+      const primaryVehicle = cleanVehicles.find((v) => v.isPrimary) || (cleanVehicles.length > 0 ? cleanVehicles[0] : undefined);
 
       const updatedRoutine: Routine = {
-        id: currentUser.routine?.id || `rtn-${Date.now()}`,
+        id: activeUser.routine?.id || `rtn-${Date.now()}`,
         title: routineTitle.trim() || 'Minha Rotina Principal',
         origin: {
           address: routineOriginAddress.trim() || 'Origem Principal',
@@ -617,9 +797,9 @@ export const UserAreaView: React.FC<UserAreaViewProps> = ({
       };
 
       const updatedUser: User = {
-        ...currentUser,
-        name: name.trim() || currentUser.name,
-        email: email.trim() || currentUser.email,
+        ...activeUser,
+        name: name.trim() || activeUser.name,
+        email: email.trim() || activeUser.email,
         phone: phone.trim(),
         cpf: cpf.trim(),
         institutionName: institutionName.trim(),
@@ -641,9 +821,12 @@ export const UserAreaView: React.FC<UserAreaViewProps> = ({
         preferences: updatedPreferences,
       };
 
-      // Persist directly to Firebase Firestore
-      await updateFirestoreUserProfile(currentUser.id, updatedUser);
-      await saveFirestoreRoutine(currentUser.id, updatedRoutine);
+      // Persist directly to Firebase Firestore with merge
+      await updateFirestoreUserProfile(activeUser.id, updatedUser);
+      await saveFirestoreRoutine(activeUser.id, updatedRoutine);
+      if (activeUser.id === currentUser.id) {
+        saveUserSession(updatedUser);
+      }
       onUserUpdated(updatedUser);
       if (onUpdateRoutine) {
         onUpdateRoutine(updatedRoutine, defaultMeetingPoint);
@@ -663,6 +846,186 @@ export const UserAreaView: React.FC<UserAreaViewProps> = ({
 
   return (
     <div className="max-w-7xl mx-auto space-y-6 pb-16 animate-in fade-in duration-150">
+      {/* SuperUser Support & Profile Switcher Toolbar */}
+      {isSuper && (
+        <div className="bg-gradient-to-r from-amber-500/15 via-amber-500/10 to-amber-500/5 border-2 border-amber-500/40 rounded-3xl p-5 shadow-xs space-y-4">
+          <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+            <div className="flex items-center space-x-3">
+              <div className="p-2.5 bg-amber-500 text-slate-950 rounded-2xl shadow-xs font-black">
+                <Crown className="w-5 h-5" />
+              </div>
+              <div>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="text-xs font-extrabold uppercase tracking-wider bg-amber-500 text-slate-950 px-2.5 py-0.5 rounded-full">
+                    Acesso Superusuário: Suporte a Perfis
+                  </span>
+                  <span className="text-xs font-bold text-amber-900">
+                    {allUsers.length} perfis cadastrados no Firestore
+                  </span>
+                </div>
+                <p className="text-xs text-slate-700 mt-0.5">
+                  {isAssistingOtherUser ? (
+                    <span>
+                      Você está prestando suporte técnico e configurando o perfil de{' '}
+                      <strong className="text-slate-950 font-bold">{activeUser.name}</strong> ({activeUser.email}).
+                    </span>
+                  ) : (
+                    <span>
+                      Você está visualizando seu perfil administrativo. Selecione qualquer usuário para auditar ou ajustar configurações, rotinas, veículos, endereços e preferências.
+                    </span>
+                  )}
+                </p>
+              </div>
+            </div>
+
+            {/* Quick Actions if assisting other user */}
+            <div className="flex items-center gap-2 flex-wrap">
+              {isAssistingOtherUser && (
+                <>
+                  {onStartSupportSession && (
+                    <button
+                      type="button"
+                      onClick={() => onStartSupportSession(activeUser)}
+                      className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-xl shadow-xs transition flex items-center gap-1.5 cursor-pointer"
+                      title="Assumir sessão e navegar como este usuário"
+                    >
+                      <LogIn className="w-3.5 h-3.5" />
+                      <span>Assumir Sessão ({activeUser.name.split(' ')[0]})</span>
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => setSelectedUserId(currentUser.id)}
+                    className="px-3 py-1.5 bg-white hover:bg-slate-50 text-slate-800 border border-slate-300 font-bold text-xs rounded-xl transition flex items-center gap-1.5 cursor-pointer shadow-2xs"
+                  >
+                    <UserIcon className="w-3.5 h-3.5 text-indigo-600" />
+                    <span>Voltar ao Meu Perfil</span>
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+
+          {/* User Selector Dropdown / Search Input */}
+          <div className="bg-white border border-amber-300/80 rounded-2xl p-3 shadow-xs">
+            <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
+              <div className="relative flex-1">
+                <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                <input
+                  type="text"
+                  placeholder="Pesquisar perfil por nome, e-mail, instituição ou telefone..."
+                  value={userSearchTerm}
+                  onChange={(e) => {
+                    setUserSearchTerm(e.target.value);
+                    setShowUserDropdown(true);
+                  }}
+                  onFocus={() => setShowUserDropdown(true)}
+                  className="w-full pl-9 pr-8 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:outline-hidden focus:ring-2 focus:ring-amber-500/50"
+                />
+                {userSearchTerm && (
+                  <button
+                    type="button"
+                    onClick={() => setUserSearchTerm('')}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
+
+              <div className="relative min-w-[260px]">
+                <select
+                  value={activeUser.id}
+                  onChange={(e) => {
+                    setSelectedUserId(e.target.value);
+                    setShowUserDropdown(false);
+                  }}
+                  className="w-full px-3 py-2 text-xs font-semibold bg-amber-50/60 border border-amber-300 rounded-xl text-slate-900 focus:outline-hidden focus:ring-2 focus:ring-amber-500 cursor-pointer"
+                >
+                  <option value={currentUser.id}>★ Meu Perfil Superusuário ({currentUser.name})</option>
+                  <optgroup label="Todos os Usuários da Plataforma">
+                    {allUsers
+                      .filter((u) => u.id !== currentUser.id)
+                      .map((u) => (
+                        <option key={u.id} value={u.id}>
+                          {u.name} ({u.email}) - {u.rolePreference === 'driver' ? 'Motorista' : u.rolePreference === 'passenger' ? 'Passageiro' : 'Membro'}
+                        </option>
+                      ))}
+                  </optgroup>
+                </select>
+              </div>
+            </div>
+
+            {/* Quick Filtered Search Results Dropdown when typing */}
+            {showUserDropdown && userSearchTerm.trim().length > 0 && (
+              <div className="mt-2.5 border-t border-slate-100 pt-2 max-h-56 overflow-y-auto divide-y divide-slate-100">
+                {allUsers
+                  .filter((u) => {
+                    const q = userSearchTerm.toLowerCase();
+                    return (
+                      u.name.toLowerCase().includes(q) ||
+                      u.email.toLowerCase().includes(q) ||
+                      (u.institutionName || '').toLowerCase().includes(q) ||
+                      (u.phone || '').includes(q)
+                    );
+                  })
+                  .slice(0, 10)
+                  .map((u) => {
+                    const isSelected = u.id === activeUser.id;
+                    return (
+                      <button
+                        key={u.id}
+                        type="button"
+                        onClick={() => {
+                          setSelectedUserId(u.id);
+                          setShowUserDropdown(false);
+                          setUserSearchTerm('');
+                        }}
+                        className={`w-full text-left py-2 px-3 rounded-xl flex items-center justify-between gap-3 transition cursor-pointer ${
+                          isSelected ? 'bg-amber-100/70 text-slate-950 font-bold' : 'hover:bg-slate-50 text-slate-700'
+                        }`}
+                      >
+                        <div className="flex items-center space-x-2.5 min-w-0">
+                          <img src={u.avatar} alt={u.name} className="w-6 h-6 rounded-lg object-cover shrink-0" />
+                          <div className="truncate">
+                            <p className="text-xs font-bold truncate">
+                              {u.name} {u.id === currentUser.id && <span className="text-[10px] text-amber-700">(Você)</span>}
+                            </p>
+                            <p className="text-[10px] text-slate-500 font-mono truncate">{u.email}</p>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          <span className="text-[9px] px-1.5 py-0.5 bg-slate-100 text-slate-600 rounded-md font-medium">
+                            {u.rolePreference || 'ambos'}
+                          </span>
+                          {u.emailVerified && (
+                            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+                          )}
+                          <ArrowRight className="w-3 h-3 text-slate-400" />
+                        </div>
+                      </button>
+                    );
+                  })}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {onNavigateToTab && (
+        <div className="flex items-center justify-between pb-1">
+          <button
+            type="button"
+            id="btn-user-area-back-to-rides"
+            onClick={() => onNavigateToTab('rides')}
+            className="inline-flex items-center space-x-2 px-3.5 py-2 rounded-xl bg-white border border-slate-200 text-xs font-bold text-slate-700 hover:text-indigo-600 hover:border-indigo-200 hover:bg-indigo-50/50 transition cursor-pointer shadow-2xs active:scale-95"
+          >
+            <ArrowLeft className="w-3.5 h-3.5" />
+            <span>Voltar para as Caronas</span>
+          </button>
+        </div>
+      )}
+
       {/* Top Banner / Digital ID Card */}
       <div className="bg-gradient-to-r from-slate-900 via-indigo-950 to-slate-900 border border-slate-800 rounded-3xl p-6 sm:p-8 text-white shadow-xl relative overflow-hidden">
         {/* Subtle decorative glow */}
@@ -692,15 +1055,21 @@ export const UserAreaView: React.FC<UserAreaViewProps> = ({
                 <h1 className="font-display font-bold text-xl sm:text-2xl text-white tracking-tight">
                   {name || 'Nome do Usuário'}
                 </h1>
-                {isSuper && (
+                {isSuperUser(activeUser) && (
                   <span className="inline-flex items-center gap-1 text-[11px] font-bold bg-amber-500 text-slate-950 px-2.5 py-0.5 rounded-full shadow-xs">
                     <Crown className="w-3.5 h-3.5" />
                     Superusuário
                   </span>
                 )}
+                {isAssistingOtherUser && (
+                  <span className="inline-flex items-center gap-1 text-[11px] font-bold bg-indigo-500 text-white px-2.5 py-0.5 rounded-full shadow-xs">
+                    <Sliders className="w-3 h-3" />
+                    Modo Suporte Técnico
+                  </span>
+                )}
                 <span className="inline-flex items-center gap-1 text-[11px] font-medium bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 px-2.5 py-0.5 rounded-full">
                   <CheckCircle2 className="w-3 h-3" />
-                  Conta Verificada
+                  {isEmailVerified ? 'Conta Verificada' : 'Aguardando Validação'}
                 </span>
               </div>
 
@@ -715,15 +1084,15 @@ export const UserAreaView: React.FC<UserAreaViewProps> = ({
 
               <div className="flex items-center gap-3 text-xs pt-1">
                 <span className="text-amber-400 font-bold flex items-center gap-1 font-mono">
-                  ★ {currentUser.rating?.toFixed(1) || '5.0'}
+                  ★ {activeUser.rating?.toFixed(1) || '5.0'}
                 </span>
                 <span className="text-slate-400">|</span>
                 <span className="text-slate-300">
-                  <strong className="text-white font-mono">{currentUser.totalRidesOffered || 0}</strong> caronas dadas
+                  <strong className="text-white font-mono">{activeUser.totalRidesOffered || 0}</strong> caronas dadas
                 </span>
                 <span className="text-slate-400">|</span>
                 <span className="text-slate-300">
-                  <strong className="text-white font-mono">{currentUser.totalRidesTaken || 0}</strong> viagens pegas
+                  <strong className="text-white font-mono">{activeUser.totalRidesTaken || 0}</strong> viagens pegas
                 </span>
               </div>
             </div>
@@ -733,11 +1102,15 @@ export const UserAreaView: React.FC<UserAreaViewProps> = ({
           <div className="flex items-center gap-3 bg-white/5 backdrop-blur-md border border-white/10 p-4 rounded-2xl self-stretch md:self-auto justify-between md:justify-end">
             <div className="text-left pr-4 border-r border-white/10">
               <span className="text-[10px] uppercase font-mono text-indigo-300 block">Saldo na Plataforma</span>
-              <p className={`text-lg font-bold font-mono ${currentUser.saldo_caronas >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                {currentUser.saldo_caronas >= 0 ? `+ R$ ${(currentUser.saldo_caronas * 6.50 + 39).toFixed(2)}` : `- R$ ${Math.abs(currentUser.saldo_caronas * 6.50).toFixed(2)}`}
+              <p className={`text-lg font-bold font-mono ${(activeUser.saldo_caronas || 0) > 0 ? 'text-emerald-400' : (activeUser.saldo_caronas || 0) < 0 ? 'text-rose-400' : 'text-slate-200'}`}>
+                {(activeUser.saldo_caronas || 0) > 0
+                  ? `+ R$ ${((activeUser.saldo_caronas || 0) * 6.50).toFixed(2)}`
+                  : (activeUser.saldo_caronas || 0) < 0
+                  ? `- R$ ${Math.abs((activeUser.saldo_caronas || 0) * 6.50).toFixed(2)}`
+                  : 'R$ 0,00'}
               </p>
-              <span className="text-[10px] text-slate-400 font-mono">
-                {currentUser.saldo_caronas >= 0 ? `+${currentUser.saldo_caronas}` : currentUser.saldo_caronas} viagens equivalentes
+              <span className="text-[10px] text-slate-400 font-medium">
+                Extrato financeiro em Reais
               </span>
             </div>
 
@@ -751,20 +1124,52 @@ export const UserAreaView: React.FC<UserAreaViewProps> = ({
                 <span>Extrato PIX</span>
               </button>
             )}
+
+            <PWAInstallCard variant="button" />
           </div>
         </div>
       </div>
+
+      {/* PWA / Shortcut Creation Banner in User Area */}
+      <PWAInstallCard variant="card" onInstalled={() => {}} />
 
       {/* Main Grid: Sub-Navigation + Configuration Panels */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
         {/* Left Side Navigation Cards */}
         <div className="lg:col-span-4 space-y-3">
           <div className="bg-white border border-slate-200 rounded-3xl p-3 shadow-xs space-y-1 sticky top-20">
-            <div className="p-3 pb-2">
+            <div className="p-3 pb-2 flex items-center justify-between">
               <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider font-mono">
                 Configurações da Conta
               </h3>
             </div>
+
+            <button
+              type="button"
+              id="user-nav-app-install"
+              onClick={() => setActiveSection('app_install')}
+              className={`w-full text-left px-4 py-3 rounded-2xl flex items-center justify-between transition cursor-pointer ${
+                activeSection === 'app_install'
+                  ? 'bg-gradient-to-r from-emerald-600 to-teal-600 text-white font-bold shadow-xs'
+                  : 'hover:bg-emerald-50/80 text-slate-800 font-medium'
+              }`}
+            >
+              <div className="flex items-center space-x-3">
+                <Smartphone className={`w-4 h-4 ${activeSection === 'app_install' ? 'text-white' : 'text-emerald-600'}`} />
+                <div>
+                  <div className="flex items-center gap-1.5">
+                    <p className="text-xs leading-tight font-bold">Instalar App & Atalho</p>
+                    <span className={`text-[9px] px-1.5 py-0.2 rounded font-black uppercase ${activeSection === 'app_install' ? 'bg-emerald-800 text-emerald-100' : 'bg-emerald-100 text-emerald-800'}`}>
+                      PWA
+                    </span>
+                  </div>
+                  <p className={`text-[10px] ${activeSection === 'app_install' ? 'text-emerald-100' : 'text-slate-400'}`}>
+                    Criar atalho no celular e PC
+                  </p>
+                </div>
+              </div>
+              <ArrowRight className="w-3.5 h-3.5 opacity-60" />
+            </button>
 
             <button
               type="button"
@@ -1182,6 +1587,31 @@ export const UserAreaView: React.FC<UserAreaViewProps> = ({
                   >
                     <Trash2 className="w-3.5 h-3.5" />
                     <span>Excluir Minha Conta</span>
+                  </button>
+                </div>
+
+                {/* Save Identity Button Bar */}
+                <div className="pt-4 flex flex-col sm:flex-row items-center justify-between gap-3 border-t border-slate-100">
+                  <span className="text-[11px] text-slate-500 font-medium">
+                    Sincronização direta com perfil Firestore e sessão ativa.
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => handleSaveAll()}
+                    disabled={saving}
+                    className="w-full sm:w-auto px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 active:scale-95 text-white font-bold text-xs rounded-xl shadow-xs transition flex items-center justify-center space-x-2 cursor-pointer disabled:opacity-50"
+                  >
+                    {saving ? (
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        <span>Salvando Dados Pessoais...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Save className="w-4 h-4" />
+                        <span>Salvar Dados Pessoais</span>
+                      </>
+                    )}
                   </button>
                 </div>
               </div>
@@ -1706,6 +2136,31 @@ export const UserAreaView: React.FC<UserAreaViewProps> = ({
                     <span>4.000m (Amplo)</span>
                   </div>
                 </div>
+
+                {/* Save Commute Button Bar */}
+                <div className="pt-4 flex flex-col sm:flex-row items-center justify-between gap-3 border-t border-slate-100">
+                  <span className="text-[11px] text-slate-500 font-medium">
+                    Suas preferências de convivência serão aplicadas às caronas.
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => handleSaveAll()}
+                    disabled={saving}
+                    className="w-full sm:w-auto px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 active:scale-95 text-white font-bold text-xs rounded-xl shadow-xs transition flex items-center justify-center space-x-2 cursor-pointer disabled:opacity-50"
+                  >
+                    {saving ? (
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        <span>Salvando Preferências...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Save className="w-4 h-4" />
+                        <span>Salvar Preferências de Convivência</span>
+                      </>
+                    )}
+                  </button>
+                </div>
               </div>
             )}
 
@@ -1715,19 +2170,32 @@ export const UserAreaView: React.FC<UserAreaViewProps> = ({
                 <div>
                   <h2 className="text-base font-bold text-slate-900 flex items-center gap-2">
                     <MapPin className="w-5 h-5 text-indigo-600" />
-                    Endereço Residencial & Ponto de Encontro
+                    Endereço Padrão & Ponto de Encontro
                   </h2>
                   <p className="text-xs text-slate-500 mt-1">
                     Configure sua base de partida e o ponto público ideal para embarque ágil.
                   </p>
                 </div>
 
-                {/* Residential Address */}
+                {/* Dica de Segurança / Privacidade de Endereço */}
+                <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 flex items-start gap-3 text-xs text-amber-900">
+                  <ShieldAlert className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+                  <div className="space-y-1">
+                    <p className="font-bold text-amber-950 text-sm">
+                      Dica de Segurança: Não informe o número exato da sua residência
+                    </p>
+                    <p className="text-amber-800 text-xs leading-relaxed">
+                      Por motivos de segurança e privacidade, recomendamos não colocar seu endereço residencial exato (como número de casa ou apartamento). Sugerimos informar um endereço próximo de um ponto de referência (ex: comércio, praça, estação de metrô/trem) ou que identifique no mínimo o seu bairro.
+                    </p>
+                  </div>
+                </div>
+
+                {/* Standard Address */}
                 <div className="p-4 bg-slate-50 border border-slate-200 rounded-2xl space-y-3">
                   <div className="flex items-center justify-between">
                     <span className="text-xs font-bold text-slate-900 flex items-center gap-1.5">
                       <Home className="w-4 h-4 text-indigo-600" />
-                      Endereço Residencial (Base)
+                      Endereço Padrão (Ponto de Referência ou Bairro)
                     </span>
                     <div className="flex items-center space-x-2">
                       <button
@@ -1754,7 +2222,7 @@ export const UserAreaView: React.FC<UserAreaViewProps> = ({
                     type="text"
                     value={resAddress}
                     onChange={(e) => setResAddress(e.target.value)}
-                    placeholder="Rua, número, bairro, cidade - UF"
+                    placeholder="Ex: Próximo à Praça Panamericana - Pinheiros, São Paulo - SP"
                     className="w-full px-3.5 py-2 text-xs border border-slate-200 rounded-xl bg-white focus:ring-2 focus:ring-indigo-500 outline-hidden font-medium"
                   />
                   <p className="text-[10px] text-slate-400 font-mono">
@@ -1766,7 +2234,7 @@ export const UserAreaView: React.FC<UserAreaViewProps> = ({
                 <div className="p-4 bg-indigo-50/60 border border-indigo-100 rounded-2xl space-y-3">
                   <div className="flex items-center justify-between">
                     <div>
-                      <p className="text-xs font-bold text-slate-900">Usar residência como ponto de encontro?</p>
+                      <p className="text-xs font-bold text-slate-900">Usar endereço padrão como ponto de encontro?</p>
                       <p className="text-[11px] text-slate-600">
                         Se desmarcado, você poderá cadastrar um ponto público seguro (ex: estação de metrô ou praça).
                       </p>
@@ -1820,6 +2288,31 @@ export const UserAreaView: React.FC<UserAreaViewProps> = ({
                       </div>
                     </div>
                   )}
+                </div>
+
+                {/* Save Locations Button Bar */}
+                <div className="pt-4 flex flex-col sm:flex-row items-center justify-between gap-3 border-t border-slate-100">
+                  <span className="text-[11px] text-slate-500 font-medium">
+                    Seus endereços fixos e ponto de embarque serão atualizados.
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => handleSaveAll()}
+                    disabled={saving}
+                    className="w-full sm:w-auto px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 active:scale-95 text-white font-bold text-xs rounded-xl shadow-xs transition flex items-center justify-center space-x-2 cursor-pointer disabled:opacity-50"
+                  >
+                    {saving ? (
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        <span>Salvando Endereços...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Save className="w-4 h-4" />
+                        <span>Salvar Endereço & Pontos de Encontro</span>
+                      </>
+                    )}
+                  </button>
                 </div>
               </div>
             )}
@@ -1978,7 +2471,7 @@ export const UserAreaView: React.FC<UserAreaViewProps> = ({
                               </div>
 
                               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                                <div className="space-y-1">
+                                <div className="space-y-1.5">
                                   <label className="block text-[11px] font-bold text-slate-700">Modelo e Versão</label>
                                   <input
                                     type="text"
@@ -1988,12 +2481,28 @@ export const UserAreaView: React.FC<UserAreaViewProps> = ({
                                       updated[index] = { ...updated[index], model: e.target.value };
                                       setVehiclesList(updated);
                                     }}
-                                    placeholder="Ex: Toyota Corolla / Honda Civic"
+                                    placeholder="Ex: Toyota Corolla / Onix / HB20"
                                     className="w-full px-3 py-2 text-xs border border-slate-200 rounded-xl bg-white focus:ring-2 focus:ring-indigo-500 font-medium"
                                   />
+                                  <div className="flex flex-wrap gap-1.5 pt-0.5">
+                                    {['Corolla', 'Onix', 'HB20', 'Compass', 'Polo', 'Civic', 'T-Cross', 'Kwid'].map((mPreset) => (
+                                      <button
+                                        key={mPreset}
+                                        type="button"
+                                        onClick={() => {
+                                          const updated = [...vehiclesList];
+                                          updated[index] = { ...updated[index], model: mPreset };
+                                          setVehiclesList(updated);
+                                        }}
+                                        className="px-2 py-0.5 text-[10px] font-medium bg-slate-100 hover:bg-indigo-50 hover:text-indigo-600 text-slate-600 rounded-md transition cursor-pointer"
+                                      >
+                                        +{mPreset}
+                                      </button>
+                                    ))}
+                                  </div>
                                 </div>
 
-                                <div className="space-y-1">
+                                <div className="space-y-1.5">
                                   <label className="block text-[11px] font-bold text-slate-700">Cor do Veículo</label>
                                   <input
                                     type="text"
@@ -2003,13 +2512,53 @@ export const UserAreaView: React.FC<UserAreaViewProps> = ({
                                       updated[index] = { ...updated[index], color: e.target.value };
                                       setVehiclesList(updated);
                                     }}
-                                    placeholder="Ex: Prata, Preto, Cinza"
+                                    placeholder="Ex: Prata, Preto, Branco"
                                     className="w-full px-3 py-2 text-xs border border-slate-200 rounded-xl bg-white focus:ring-2 focus:ring-indigo-500 font-medium"
                                   />
+                                  <div className="flex flex-wrap gap-1.5 pt-0.5">
+                                    {['Prata', 'Branco', 'Preto', 'Cinza', 'Vermelho', 'Azul'].map((cPreset) => (
+                                      <button
+                                        key={cPreset}
+                                        type="button"
+                                        onClick={() => {
+                                          const updated = [...vehiclesList];
+                                          updated[index] = { ...updated[index], color: cPreset };
+                                          setVehiclesList(updated);
+                                        }}
+                                        className={`px-2 py-0.5 text-[10px] font-medium rounded-md transition cursor-pointer ${
+                                          veh.color === cPreset
+                                            ? 'bg-indigo-600 text-white font-bold'
+                                            : 'bg-slate-100 hover:bg-slate-200 text-slate-700'
+                                        }`}
+                                      >
+                                        {cPreset}
+                                      </button>
+                                    ))}
+                                  </div>
                                 </div>
                               </div>
 
-                              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                              <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
+                                <div className="space-y-1">
+                                  <label className="block text-[11px] font-bold text-slate-700">Categoria</label>
+                                  <select
+                                    value={veh.category || 'sedan'}
+                                    onChange={(e) => {
+                                      const updated = [...vehiclesList];
+                                      updated[index] = { ...updated[index], category: e.target.value as any };
+                                      setVehiclesList(updated);
+                                    }}
+                                    className="w-full px-3 py-2 text-xs border border-slate-200 rounded-xl bg-white focus:ring-2 focus:ring-indigo-500 font-medium"
+                                  >
+                                    <option value="sedan">Sedan</option>
+                                    <option value="hatch">Hatchback</option>
+                                    <option value="suv">SUV</option>
+                                    <option value="electric">Elétrico / Híbrido</option>
+                                    <option value="pickup">Pickup</option>
+                                    <option value="minivan">Minivan</option>
+                                  </select>
+                                </div>
+
                                 <div className="space-y-1">
                                   <label className="block text-[11px] font-bold text-slate-700">Placa (Mercosul)</label>
                                   <input
@@ -2067,6 +2616,31 @@ export const UserAreaView: React.FC<UserAreaViewProps> = ({
                     )}
                   </div>
                 )}
+
+                {/* Save Vehicle Button Bar */}
+                <div className="pt-4 flex flex-col sm:flex-row items-center justify-between gap-3 border-t border-slate-100">
+                  <span className="text-[11px] text-slate-500 font-medium">
+                    Os dados do veículo serão sincronizados com seu perfil e rotinas.
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => handleSaveAll()}
+                    disabled={saving}
+                    className="w-full sm:w-auto px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 active:scale-95 text-white font-bold text-xs rounded-xl shadow-xs transition flex items-center justify-center space-x-2 cursor-pointer disabled:opacity-50"
+                  >
+                    {saving ? (
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        <span>Salvando Veículo...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Save className="w-4 h-4" />
+                        <span>Salvar Meu Veículo e Garagem</span>
+                      </>
+                    )}
+                  </button>
+                </div>
               </div>
             )}
 
@@ -2143,6 +2717,31 @@ export const UserAreaView: React.FC<UserAreaViewProps> = ({
                       className="w-full px-3.5 py-2.5 text-xs border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-hidden font-mono font-medium"
                     />
                   </div>
+                </div>
+
+                {/* Save Financial Button Bar */}
+                <div className="pt-4 flex flex-col sm:flex-row items-center justify-between gap-3 border-t border-slate-100">
+                  <span className="text-[11px] text-slate-500 font-medium">
+                    Sua chave PIX será usada para os acertos financeiros automáticos.
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => handleSaveAll()}
+                    disabled={saving}
+                    className="w-full sm:w-auto px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 active:scale-95 text-white font-bold text-xs rounded-xl shadow-xs transition flex items-center justify-center space-x-2 cursor-pointer disabled:opacity-50"
+                  >
+                    {saving ? (
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        <span>Salvando Dados PIX...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Save className="w-4 h-4" />
+                        <span>Salvar Chave PIX & Dados Bancários</span>
+                      </>
+                    )}
+                  </button>
                 </div>
               </div>
             )}
@@ -2255,16 +2854,38 @@ export const UserAreaView: React.FC<UserAreaViewProps> = ({
                             </div>
                           </div>
 
-                          {u.id !== currentUser.id && (
+                          <div className="flex items-center space-x-1 shrink-0">
                             <button
                               type="button"
-                              onClick={() => setTargetUserToDelete(u)}
-                              className="p-1.5 text-rose-400 hover:text-white hover:bg-rose-600/50 rounded-lg transition cursor-pointer shrink-0"
-                              title={`Excluir conta de ${u.name}`}
+                              onClick={() => setSelectedUserId(u.id)}
+                              className="p-1.5 text-indigo-400 hover:text-white hover:bg-indigo-600/50 rounded-lg transition cursor-pointer"
+                              title={`Configurar perfil de ${u.name}`}
                             >
-                              <Trash2 className="w-3.5 h-3.5" />
+                              <Sliders className="w-3.5 h-3.5" />
                             </button>
-                          )}
+
+                            {onStartSupportSession && (
+                              <button
+                                type="button"
+                                onClick={() => onStartSupportSession(u)}
+                                className="p-1.5 text-amber-400 hover:text-slate-950 hover:bg-amber-400 rounded-lg transition cursor-pointer"
+                                title={`Assumir sessão de ${u.name}`}
+                              >
+                                <LogIn className="w-3.5 h-3.5" />
+                              </button>
+                            )}
+
+                            {u.id !== currentUser.id && (
+                              <button
+                                type="button"
+                                onClick={() => setTargetUserToDelete(u)}
+                                className="p-1.5 text-rose-400 hover:text-white hover:bg-rose-600/50 rounded-lg transition cursor-pointer"
+                                title={`Excluir conta de ${u.name}`}
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            )}
+                          </div>
                         </div>
                       ))}
                     </div>
@@ -2295,6 +2916,31 @@ export const UserAreaView: React.FC<UserAreaViewProps> = ({
                       <span>Excluir Minha Conta Permanentemente</span>
                     </button>
                   </div>
+                </div>
+
+                {/* Save Privacy Button Bar */}
+                <div className="pt-4 flex flex-col sm:flex-row items-center justify-between gap-3 border-t border-slate-100">
+                  <span className="text-[11px] text-slate-500 font-medium">
+                    Suas preferências de privacidade e notificações serão atualizadas.
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => handleSaveAll()}
+                    disabled={saving}
+                    className="w-full sm:w-auto px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 active:scale-95 text-white font-bold text-xs rounded-xl shadow-xs transition flex items-center justify-center space-x-2 cursor-pointer disabled:opacity-50"
+                  >
+                    {saving ? (
+                      <>
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                        <span>Salvando Privacidade...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Save className="w-4 h-4" />
+                        <span>Salvar Configurações de Privacidade</span>
+                      </>
+                    )}
+                  </button>
                 </div>
               </div>
             )}
@@ -2498,72 +3144,123 @@ export const UserAreaView: React.FC<UserAreaViewProps> = ({
                       </div>
                     </div>
 
-                    {/* Test Dispatch Button */}
-                    <div className="pt-2 flex flex-col sm:flex-row items-center justify-between gap-3 border-t border-white/10">
-                      <p className="text-[11px] text-indigo-200/80">
-                        Destino do teste: <strong className="text-white font-mono">{email || 'Seu e-mail cadastrado'}</strong>
-                      </p>
-                      <button
-                        type="button"
-                        disabled={emailSending}
-                        onClick={async () => {
-                          setEmailSending(true);
-                          setEmailSendResult(null);
-                          try {
-                            const res = await sendEmailConfirmation({
-                              type: 'RIDE_CREATED',
-                              recipientEmail: email || 'usuario@usp.br',
-                              recipientName: name || 'Usuário',
-                              rideId: 'teste-smtp',
-                              rideData: {
+                    {/* Test Dispatch Controls */}
+                    <div className="pt-3 border-t border-white/10 space-y-3">
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
+                        <span className="text-indigo-200 font-semibold">Selecione o Modelo de Teste:</span>
+                        <div className="flex flex-wrap gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => setTestEmailTemplate('RIDE_CANCELLED')}
+                            className={`px-2.5 py-1 rounded-lg font-bold text-[11px] transition cursor-pointer ${
+                              testEmailTemplate === 'RIDE_CANCELLED'
+                                ? 'bg-rose-500 text-white shadow-xs'
+                                : 'bg-white/10 text-slate-300 hover:bg-white/20'
+                            }`}
+                          >
+                            ❌ Viagem Cancelada (Passageiro)
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setTestEmailTemplate('RIDE_CREATED')}
+                            className={`px-2.5 py-1 rounded-lg font-bold text-[11px] transition cursor-pointer ${
+                              testEmailTemplate === 'RIDE_CREATED'
+                                ? 'bg-indigo-500 text-white shadow-xs'
+                                : 'bg-white/10 text-slate-300 hover:bg-white/20'
+                            }`}
+                          >
+                            🚗 Nova Carona
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setTestEmailTemplate('WELCOME')}
+                            className={`px-2.5 py-1 rounded-lg font-bold text-[11px] transition cursor-pointer ${
+                              testEmailTemplate === 'WELCOME'
+                                ? 'bg-emerald-500 text-white shadow-xs'
+                                : 'bg-white/10 text-slate-300 hover:bg-white/20'
+                            }`}
+                          >
+                            👋 Boas-vindas
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="flex flex-col sm:flex-row items-center justify-between gap-3 pt-1">
+                        <p className="text-[11px] text-indigo-200/80">
+                          Destino do teste: <strong className="text-white font-mono">{email || 'Seu e-mail cadastrado'}</strong>
+                        </p>
+                        <button
+                          type="button"
+                          disabled={emailSending}
+                          onClick={async () => {
+                            setEmailSending(true);
+                            setEmailSendResult(null);
+                            try {
+                              const rideDetails = {
                                 originAddress: resAddress || 'Campus Central USP',
                                 destinationAddress: 'Av. Paulista, 1000 - Bela Vista',
                                 departureDate: new Date().toLocaleDateString('pt-BR'),
                                 departureTime: '08:00',
                                 price: 6.50,
                                 totalSeats: 3,
+                                driverName: name || 'Carlos Silva (Motorista)',
                                 vehicleModel: vehiclesList[0]?.model || 'Veículo Cadastrado',
                                 vehiclePlate: vehiclesList[0]?.plate || 'BRA-2026',
                                 groupName: 'Docentes & Alunos USP',
-                                notes: 'Disparo de validação do serviço de e-mails.',
-                              },
-                            });
-                            if (res.success) {
-                              setEmailSendResult({
-                                success: true,
-                                message: res.simulated
-                                  ? 'E-mail de confirmação gerado e simulado com sucesso (Console do Servidor).'
-                                  : 'E-mail de teste enviado com sucesso para ' + (email || 'seu endereço') + '!',
+                                notes: 'Viagem de demonstração do sistema.',
+                                cancellationReason: 'Imprevisto mecânico no veículo - Carona cancelada preventivamente.',
+                              };
+
+                              const res = await sendEmailConfirmation({
+                                type: testEmailTemplate,
+                                recipientEmail: email || 'usuario@usp.br',
+                                recipientName: name || 'Usuário',
+                                rideId: 'teste-template',
+                                rideData: rideDetails,
+                                cancellationReason: testEmailTemplate === 'RIDE_CANCELLED' ? rideDetails.cancellationReason : undefined,
                               });
-                            } else {
+
+                              if (res.success) {
+                                setEmailSendResult({
+                                  success: true,
+                                  message: res.simulated
+                                    ? `E-mail (${testEmailTemplate}) simulado com sucesso (Console do Servidor).`
+                                    : `E-mail (${testEmailTemplate}) enviado com sucesso para ${email || 'seu endereço'} via contato@apponline.ia.br!`,
+                                });
+                              } else {
+                                setEmailSendResult({
+                                  success: false,
+                                  message: res.error || 'Falha ao enviar e-mail de teste.',
+                                });
+                              }
+                            } catch (err: any) {
                               setEmailSendResult({
                                 success: false,
-                                message: res.error || 'Falha ao enviar e-mail de teste.',
+                                message: err?.message || 'Erro de conexão com o endpoint de e-mails.',
                               });
+                            } finally {
+                              setEmailSending(false);
                             }
-                          } catch (err: any) {
-                            setEmailSendResult({
-                              success: false,
-                              message: err?.message || 'Erro de conexão com o endpoint de e-mails.',
-                            });
-                          } finally {
-                            setEmailSending(false);
-                          }
-                        }}
-                        className="w-full sm:w-auto px-4 py-2 bg-indigo-500 hover:bg-indigo-600 text-white font-bold text-xs rounded-xl shadow-xs transition active:scale-95 flex items-center justify-center space-x-2 cursor-pointer disabled:opacity-50"
-                      >
-                        {emailSending ? (
-                          <>
-                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                            <span>Enviando...</span>
-                          </>
-                        ) : (
-                          <>
-                            <Send className="w-3.5 h-3.5" />
-                            <span>Enviar E-mail de Teste</span>
-                          </>
-                        )}
-                      </button>
+                          }}
+                          className={`w-full sm:w-auto px-4 py-2 font-bold text-xs rounded-xl shadow-xs transition active:scale-95 flex items-center justify-center space-x-2 cursor-pointer disabled:opacity-50 text-white ${
+                            testEmailTemplate === 'RIDE_CANCELLED'
+                              ? 'bg-rose-600 hover:bg-rose-700'
+                              : 'bg-indigo-500 hover:bg-indigo-600'
+                          }`}
+                        >
+                          {emailSending ? (
+                            <>
+                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                              <span>Enviando...</span>
+                            </>
+                          ) : (
+                            <>
+                              <Send className="w-3.5 h-3.5" />
+                              <span>Disparar Teste ({testEmailTemplate})</span>
+                            </>
+                          )}
+                        </button>
+                      </div>
                     </div>
 
                     {emailSendResult && (
@@ -2578,6 +3275,250 @@ export const UserAreaView: React.FC<UserAreaViewProps> = ({
                     )}
                   </div>
                 )}
+
+                {/* EMAIL DELIVERY MONITORING & FAILURE AUDIT CARD */}
+                <div className="p-6 bg-white rounded-3xl border border-slate-200 shadow-xs space-y-5">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 pb-4">
+                    <div>
+                      <div className="flex items-center space-x-2 text-xs font-bold text-indigo-600 font-mono uppercase tracking-wider">
+                        <Monitor className="w-3.5 h-3.5" />
+                        <span>Auditoria Contínua & Confiabilidade</span>
+                      </div>
+                      <h3 className="font-display font-bold text-base text-slate-900 mt-1 flex items-center gap-2">
+                        <span>Monitor de Entrega de E-mails & Notificações</span>
+                        {deliverySummary.failed > 0 ? (
+                          <span className="px-2 py-0.5 text-[10px] font-bold bg-rose-100 text-rose-800 rounded-full border border-rose-200">
+                            ⚠️ {deliverySummary.failed} falha(s) detectada(s)
+                          </span>
+                        ) : (
+                          <span className="px-2 py-0.5 text-[10px] font-bold bg-emerald-100 text-emerald-800 rounded-full border border-emerald-200">
+                            ✓ Entregas operando normalmente
+                          </span>
+                        )}
+                      </h3>
+                      <p className="text-xs text-slate-500 mt-0.5">
+                        Monitoramento em tempo real das mensagens e avisos disparados para <strong className="text-slate-700 font-mono">{email || currentUser.email}</strong>.
+                      </p>
+                    </div>
+
+                    <div className="flex items-center space-x-2 shrink-0">
+                      <button
+                        type="button"
+                        onClick={loadDeliveryAudit}
+                        disabled={loadingDeliveryLogs}
+                        className="px-3 py-1.5 text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl transition flex items-center space-x-1.5 cursor-pointer disabled:opacity-50"
+                        title="Atualizar histórico de auditoria"
+                      >
+                        <RefreshCw className={`w-3.5 h-3.5 ${loadingDeliveryLogs ? 'animate-spin' : ''}`} />
+                        <span>Atualizar</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={handleRunDiagnosticTest}
+                        disabled={diagnosticSending || !email}
+                        className="px-3.5 py-1.5 text-xs font-bold bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl shadow-xs transition flex items-center space-x-1.5 cursor-pointer disabled:opacity-50 active:scale-95"
+                      >
+                        {diagnosticSending ? (
+                          <>
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            <span>Testando...</span>
+                          </>
+                        ) : (
+                          <>
+                            <Send className="w-3.5 h-3.5" />
+                            <span>Testar Entrega Agora</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Diagnostic Test Feedback */}
+                  {diagnosticResult && (
+                    <div className={`p-3.5 rounded-2xl text-xs flex items-center space-x-2.5 ${
+                      diagnosticResult.success
+                        ? 'bg-emerald-50 text-emerald-900 border border-emerald-200'
+                        : 'bg-rose-50 text-rose-900 border border-rose-200'
+                    }`}>
+                      {diagnosticResult.success ? (
+                        <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                      ) : (
+                        <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+                      )}
+                      <span className="font-medium">{diagnosticResult.message}</span>
+                    </div>
+                  )}
+
+                  {/* Summary Metric Counters */}
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-2xl">
+                      <span className="text-[10px] uppercase font-mono text-slate-500 font-bold block">
+                        Total Auditado
+                      </span>
+                      <div className="flex items-baseline space-x-1.5 mt-0.5">
+                        <span className="text-xl font-black text-slate-900 font-display">
+                          {deliverySummary.total}
+                        </span>
+                        <span className="text-[10px] text-slate-400">mensagens</span>
+                      </div>
+                    </div>
+
+                    <div className="p-3.5 bg-emerald-50/60 border border-emerald-200 rounded-2xl">
+                      <span className="text-[10px] uppercase font-mono text-emerald-700 font-bold block">
+                        Taxa de Sucesso
+                      </span>
+                      <div className="flex items-baseline space-x-1.5 mt-0.5">
+                        <span className="text-xl font-black text-emerald-800 font-display">
+                          {deliverySummary.deliveryRate}%
+                        </span>
+                        <span className="text-[10px] text-emerald-600 font-medium">
+                          ({deliverySummary.successful} entregues)
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className={`p-3.5 rounded-2xl border ${
+                      deliverySummary.failed > 0 
+                        ? 'bg-rose-50 border-rose-200 text-rose-900' 
+                        : 'bg-slate-50 border-slate-200 text-slate-700'
+                    }`}>
+                      <span className={`text-[10px] uppercase font-mono font-bold block ${
+                        deliverySummary.failed > 0 ? 'text-rose-700' : 'text-slate-500'
+                      }`}>
+                        Falhas / Bloqueios
+                      </span>
+                      <div className="flex items-baseline space-x-1.5 mt-0.5">
+                        <span className={`text-xl font-black font-display ${
+                          deliverySummary.failed > 0 ? 'text-rose-700' : 'text-slate-900'
+                        }`}>
+                          {deliverySummary.failed}
+                        </span>
+                        <span className="text-[10px] text-slate-500">
+                          {deliverySummary.failed > 0 ? 'exigem atenção' : 'sem problemas'}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Warning Box for Failed Deliveries */}
+                  {deliverySummary.failed > 0 && (
+                    <div className="p-4 bg-amber-50 border border-amber-300 rounded-2xl space-y-2 text-xs text-amber-950">
+                      <div className="flex items-center space-x-2 font-bold text-amber-900">
+                        <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+                        <span>Aviso ao Destinatário: Suas notificações por e-mail não estão sendo recebidas</span>
+                      </div>
+                      <p className="leading-relaxed">
+                        Detectamos que mensagens automáticas de confirmação de carona não foram entregues ao endereço <strong>{email || currentUser.email}</strong>. 
+                        {!isEmailVerified && (
+                          <span className="block mt-1 text-amber-900 font-medium">
+                            Motivo identificado: <strong>Seu e-mail ainda não foi validado com o código de 6 dígitos</strong>. O sistema bloqueia disparos automáticos preventivamente até que você confirme seu endereço no topo desta página.
+                          </span>
+                        )}
+                      </p>
+                      {!isEmailVerified && (
+                        <div className="pt-1">
+                          <button
+                            type="button"
+                            onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}
+                            className="px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs rounded-xl shadow-2xs transition inline-flex items-center gap-1.5 cursor-pointer"
+                          >
+                            <KeyRound className="w-3.5 h-3.5" />
+                            <span>Validar Meu E-mail com o PIN de 6 Dígitos Agora ↑</span>
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Delivery Records List */}
+                  <div className="space-y-2">
+                    <h4 className="text-xs font-bold text-slate-700 uppercase font-mono tracking-wider">
+                      Registros de Entrega Recentes
+                    </h4>
+
+                    {loadingDeliveryLogs ? (
+                      <div className="py-8 text-center text-xs text-slate-400 space-y-2">
+                        <Loader2 className="w-5 h-5 animate-spin mx-auto text-indigo-500" />
+                        <p>Carregando histórico de entrega...</p>
+                      </div>
+                    ) : deliveryLogs.length === 0 ? (
+                      <div className="p-6 bg-slate-50 border border-dashed border-slate-200 rounded-2xl text-center text-xs text-slate-500 space-y-1">
+                        <MailCheck className="w-6 h-6 text-slate-400 mx-auto" />
+                        <p className="font-semibold text-slate-700">Nenhum disparo registrado ainda para este e-mail.</p>
+                        <p className="text-[11px] text-slate-400">
+                          Clique em &quot;Testar Entrega Agora&quot; acima para registrar seu primeiro teste de envio.
+                        </p>
+                      </div>
+                    ) : (
+                      <div className="space-y-2 max-h-80 overflow-y-auto pr-1">
+                        {deliveryLogs.map((log) => {
+                          const isSuccess = log.success;
+                          const isSkipped = Boolean(log.skipped);
+                          const isFailed = !isSuccess && !isSkipped;
+                          return (
+                            <div
+                              key={log.id}
+                              className={`p-3 rounded-2xl border text-xs transition space-y-1.5 ${
+                                isSuccess
+                                  ? 'bg-slate-50/70 border-slate-200'
+                                  : isSkipped
+                                  ? 'bg-amber-50/70 border-amber-200'
+                                  : 'bg-rose-50/70 border-rose-200'
+                              }`}
+                            >
+                              <div className="flex items-start justify-between gap-2">
+                                <div className="flex items-center space-x-2">
+                                  {isSuccess ? (
+                                    <div className="w-6 h-6 rounded-full bg-emerald-100 text-emerald-700 flex items-center justify-center shrink-0">
+                                      <CheckCircle2 className="w-3.5 h-3.5" />
+                                    </div>
+                                  ) : isSkipped ? (
+                                    <div className="w-6 h-6 rounded-full bg-amber-100 text-amber-700 flex items-center justify-center shrink-0">
+                                      <AlertTriangle className="w-3.5 h-3.5" />
+                                    </div>
+                                  ) : (
+                                    <div className="w-6 h-6 rounded-full bg-rose-100 text-rose-700 flex items-center justify-center shrink-0">
+                                      <MailX className="w-3.5 h-3.5" />
+                                    </div>
+                                  )}
+                                  <div>
+                                    <strong className="text-slate-900 block font-semibold">
+                                      {getHumanReadableEmailType(log.type) || log.subject}
+                                    </strong>
+                                    <span className="text-[10px] text-slate-500 font-mono">
+                                      {new Date(log.timestamp).toLocaleString('pt-BR')} • {log.recipientEmail}
+                                    </span>
+                                  </div>
+                                </div>
+
+                                <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold shrink-0 border ${
+                                  isSuccess
+                                    ? log.simulated
+                                      ? 'bg-blue-100 text-blue-800 border-blue-200'
+                                      : 'bg-emerald-100 text-emerald-800 border-emerald-200'
+                                    : isSkipped
+                                    ? 'bg-amber-100 text-amber-800 border-amber-200'
+                                    : 'bg-rose-100 text-rose-800 border-rose-200'
+                                }`}>
+                                  {isSuccess 
+                                    ? (log.simulated ? '● Simulado' : '● Entregue') 
+                                    : (isSkipped ? '● Bloqueado (Não Validado)' : '● Falha')}
+                                </span>
+                              </div>
+
+                              {(log.reason || log.error) && !isSuccess && (
+                                <div className="mt-1 pl-8 text-[11px] text-slate-600 bg-white/70 p-2 rounded-xl border border-slate-200/60">
+                                  <strong className="text-slate-800">Diagnóstico:</strong> {log.reason || log.error}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                </div>
 
                 {/* Trigger Matrix */}
                 <div className="space-y-3">
@@ -2818,6 +3759,109 @@ export const UserAreaView: React.FC<UserAreaViewProps> = ({
               </div>
             )}
 
+            {/* SECTION: APP INSTALL & SHORTCUTS (PWA) */}
+            {activeSection === 'app_install' && (
+              <div className="space-y-6 animate-in fade-in">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <Smartphone className="w-5 h-5 text-emerald-600" />
+                    <h2 className="text-base font-bold text-slate-900">
+                      Instalar Aplicativo & Criar Atalho
+                    </h2>
+                    <span className="px-2 py-0.5 rounded-full text-[10px] font-extrabold uppercase bg-emerald-100 text-emerald-800">
+                      PWA Oficial
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-500 mt-1">
+                    Crie um atalho na tela inicial do seu celular (Android / iOS) ou na Área de Trabalho do seu computador para ter uma experiência rápida de app nativo.
+                  </p>
+                </div>
+
+                {/* Primary Card */}
+                <PWAInstallCard variant="card" />
+
+                {/* Advantages Bento Grid */}
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 pt-2">
+                  <div className="p-4 bg-slate-50 border border-slate-200 rounded-2xl space-y-1.5">
+                    <div className="w-8 h-8 rounded-xl bg-emerald-100 text-emerald-700 flex items-center justify-center font-bold text-xs">
+                      ⚡
+                    </div>
+                    <h4 className="text-xs font-bold text-slate-900">Acesso Instantâneo</h4>
+                    <p className="text-[11px] text-slate-600 leading-relaxed">
+                      Abre direto em tela cheia com 1 toque, sem precisar digitar endereço nem carregar abas do navegador.
+                    </p>
+                  </div>
+
+                  <div className="p-4 bg-slate-50 border border-slate-200 rounded-2xl space-y-1.5">
+                    <div className="w-8 h-8 rounded-xl bg-indigo-100 text-indigo-700 flex items-center justify-center font-bold text-xs">
+                      🔔
+                    </div>
+                    <h4 className="text-xs font-bold text-slate-900">Push Notifications</h4>
+                    <p className="text-[11px] text-slate-600 leading-relaxed">
+                      Receba alertas prioritários no seu dispositivo quando a viagem for iniciada ou quando houver nova carona.
+                    </p>
+                  </div>
+
+                  <div className="p-4 bg-slate-50 border border-slate-200 rounded-2xl space-y-1.5">
+                    <div className="w-8 h-8 rounded-xl bg-teal-100 text-teal-700 flex items-center justify-center font-bold text-xs">
+                      🚗
+                    </div>
+                    <h4 className="text-xs font-bold text-slate-900">GPS e Tracking ao Vivo</h4>
+                    <p className="text-[11px] text-slate-600 leading-relaxed">
+                      Melhor precisão de telemetria e visualização direta do carro do motorista se aproximando do seu embarque.
+                    </p>
+                  </div>
+                </div>
+
+                {/* Step-by-Step Device Instructions */}
+                <div className="p-5 bg-indigo-50/60 border border-indigo-100 rounded-3xl space-y-4">
+                  <h4 className="text-xs font-bold text-indigo-950 uppercase tracking-wider font-mono flex items-center gap-1.5">
+                    <Compass className="w-4 h-4 text-indigo-600" />
+                    <span>Instruções por Dispositivo</span>
+                  </h4>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+                    {/* Android Box */}
+                    <div className="bg-white p-4 rounded-2xl border border-indigo-100/80 space-y-2">
+                      <div className="flex items-center gap-2 text-slate-900 font-bold">
+                        <Smartphone className="w-4 h-4 text-emerald-600" />
+                        <span>No Celular Android (Chrome)</span>
+                      </div>
+                      <ol className="list-decimal list-inside space-y-1 text-[11px] text-slate-600 leading-relaxed">
+                        <li>Clique no botão verde <strong>"Instalar Atalho Agora"</strong> acima.</li>
+                        <li>Ou toque nos 3 pontinhos do Chrome &gt; <strong>"Adicionar à tela inicial"</strong>.</li>
+                        <li>O ícone do CaronaFlow surgirá direto na sua gaveta de aplicativos.</li>
+                      </ol>
+                    </div>
+
+                    {/* iPhone Box */}
+                    <div className="bg-white p-4 rounded-2xl border border-indigo-100/80 space-y-2">
+                      <div className="flex items-center gap-2 text-slate-900 font-bold">
+                        <Smartphone className="w-4 h-4 text-indigo-600" />
+                        <span>No iPhone / iPad (Safari)</span>
+                      </div>
+                      <ol className="list-decimal list-inside space-y-1 text-[11px] text-slate-600 leading-relaxed">
+                        <li>No Safari, toque no botão <strong>Compartilhar</strong> (ícone com seta para cima ⎋).</li>
+                        <li>Role para baixo e selecione <strong>"Adicionar à Tela de Início"</strong> (+).</li>
+                        <li>Toque em <strong>"Adicionar"</strong> no canto superior direito.</li>
+                      </ol>
+                    </div>
+
+                    {/* Desktop Box */}
+                    <div className="bg-white p-4 rounded-2xl border border-indigo-100/80 space-y-2 md:col-span-2">
+                      <div className="flex items-center gap-2 text-slate-900 font-bold">
+                        <Monitor className="w-4 h-4 text-slate-800" />
+                        <span>No Computador (Chrome / Edge / Windows / Mac)</span>
+                      </div>
+                      <p className="text-[11px] text-slate-600 leading-relaxed">
+                        No Chrome ou Edge, clique no ícone de instalação <span className="font-semibold text-slate-800">(ícone de monitor com seta ou símbolo +)</span> localizado no canto direito da <strong>barra de endereços URL</strong> do navegador. O aplicativo será fixado na sua Área de Trabalho e barra de tarefas.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
             {/* Bottom Form Actions */}
             <div className="pt-6 border-t border-slate-100 flex flex-col sm:flex-row items-center justify-between gap-4">
               <div className="text-xs text-slate-500 flex items-center space-x-1.5">
@@ -2855,7 +3899,7 @@ export const UserAreaView: React.FC<UserAreaViewProps> = ({
           isOpen={true}
           title={
             mapPickerTarget === 'residential'
-              ? 'Definir Residência no Mapa'
+              ? 'Definir Endereço Padrão no Mapa'
               : mapPickerTarget === 'meeting'
               ? 'Definir Ponto de Encontro no Mapa'
               : mapPickerTarget === 'routineOrigin'
@@ -2897,6 +3941,7 @@ export const UserAreaView: React.FC<UserAreaViewProps> = ({
               ? routineDestAddress
               : routineMeetingPoint.address
           }
+          currentUser={currentUser}
           onClose={() => setMapPickerTarget(null)}
           onSelectLocation={(location) => {
             if (mapPickerTarget === 'residential') {

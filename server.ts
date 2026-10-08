@@ -3,7 +3,7 @@ import path from 'path';
 import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI, Type } from '@google/genai';
 import { sendEmail, getSmtpConfig } from './server/email';
-import { generateEmailForAction, generateEmailVerificationCodeTemplate, ConfirmationPayload } from './server/emailTemplates';
+import { generateEmailForAction, generateEmailVerificationCodeTemplate, generatePasswordResetCodeTemplate, ConfirmationPayload } from './server/emailTemplates';
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
@@ -12,12 +12,45 @@ app.use(express.json());
 
 // In-memory store for pending verification codes (expires after 15 min)
 const verificationCodesMap = new Map<string, { code: string; expiresAt: number; userName?: string }>();
+// In-memory store for password reset PIN codes (expires after 15 min)
+const passwordResetCodesMap = new Map<string, { code: string; expiresAt: number; userName?: string }>();
 // In-memory set of verified emails (and also validated via request payload)
 const validatedEmailsSet = new Set<string>();
 
 // Pre-validate superuser and seed emails
 validatedEmailsSet.add('silvano.kassio@gmail.com');
 validatedEmailsSet.add('contato@apponline.ia.br');
+
+export interface EmailDeliveryLog {
+  id: string;
+  timestamp: string;
+  recipientEmail: string;
+  recipientName?: string;
+  recipientUserId?: string;
+  type: string;
+  subject: string;
+  success: boolean;
+  simulated: boolean;
+  skipped?: boolean;
+  error?: string;
+  messageId?: string;
+  reason?: string;
+}
+
+const emailDeliveryLogs: EmailDeliveryLog[] = [];
+
+function recordEmailDeliveryLog(log: Omit<EmailDeliveryLog, 'id' | 'timestamp'>): EmailDeliveryLog {
+  const entry: EmailDeliveryLog = {
+    id: `log-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+    timestamp: new Date().toISOString(),
+    ...log,
+  };
+  emailDeliveryLogs.unshift(entry);
+  if (emailDeliveryLogs.length > 250) {
+    emailDeliveryLogs.pop();
+  }
+  return entry;
+}
 
 // In-memory data store for live simulation state
 let liveTrackingState: Record<string, {
@@ -173,6 +206,104 @@ app.get('/api/email/validation-status', (req, res) => {
   });
 });
 
+// Password Recovery: Send 6-digit PIN code via contato@apponline.ia.br
+app.post('/api/auth/send-password-reset-code', async (req, res) => {
+  try {
+    const { email, userName } = req.body;
+    if (!email || !email.includes('@')) {
+      return res.status(400).json({ success: false, error: 'E-mail cadastrado inválido ou não fornecido' });
+    }
+
+    const normEmail = email.trim().toLowerCase();
+    // Generate secure 6-digit numeric PIN
+    const code = Math.floor(100000 + Math.random() * 900000).toString();
+    const expiresAt = Date.now() + 15 * 60 * 1000; // 15 minutes
+
+    passwordResetCodesMap.set(normEmail, {
+      code,
+      expiresAt,
+      userName: userName || 'Usuário CaronaFlow',
+    });
+
+    const { subject, html } = generatePasswordResetCodeTemplate({
+      code,
+      recipientName: userName,
+      expiresInMinutes: 15,
+    });
+
+    const result = await sendEmail({
+      to: normEmail,
+      subject,
+      html,
+      from: '"CaronaFlow Segurança" <contato@apponline.ia.br>',
+      replyTo: 'contato@apponline.ia.br',
+    });
+
+    console.log(`🔑 [PASSWORD RESET] Código de recuperação de senha enviado para ${normEmail}: ${code} (Expira em 15m)`);
+
+    res.json({
+      success: true,
+      email: normEmail,
+      simulated: result.simulated,
+      messageId: result.messageId,
+      expiresInMinutes: 15,
+      // For developer or test convenience in simulated environment
+      ...(result.simulated ? { devResetCode: code } : {}),
+    });
+  } catch (error: any) {
+    console.error('Error sending password reset code:', error);
+    res.status(500).json({ success: false, error: error.message || 'Erro ao enviar código de recuperação de senha' });
+  }
+});
+
+// Password Recovery: Verify 6-digit PIN code
+app.post('/api/auth/verify-password-reset-code', (req, res) => {
+  try {
+    const { email, code } = req.body;
+    if (!email || !code) {
+      return res.status(400).json({ success: false, error: 'E-mail e código de 6 dígitos são obrigatórios' });
+    }
+
+    const normEmail = email.trim().toLowerCase();
+    const cleanCode = code.toString().trim();
+    const pending = passwordResetCodesMap.get(normEmail);
+
+    if (!pending) {
+      return res.status(400).json({ success: false, error: 'Nenhum código de recuperação pendente ou código expirado. Solicite um novo código.' });
+    }
+
+    if (Date.now() > pending.expiresAt) {
+      passwordResetCodesMap.delete(normEmail);
+      return res.status(400).json({ success: false, error: 'Código de recuperação expirado (limite de 15 minutos). Por favor solicite um novo código.' });
+    }
+
+    if (pending.code !== cleanCode) {
+      return res.status(400).json({ success: false, error: 'Código de segurança incorreto. Verifique os 6 dígitos recebidos em seu e-mail.' });
+    }
+
+    // Success: keep valid for password change or consume
+    res.json({
+      success: true,
+      verified: true,
+      email: normEmail,
+      message: 'Código de segurança validado com sucesso. Você pode cadastrar sua nova senha.',
+    });
+  } catch (error: any) {
+    console.error('Error verifying password reset code:', error);
+    res.status(500).json({ success: false, error: error.message || 'Erro ao validar código de recuperação' });
+  }
+});
+
+// Password Recovery: Clear consumed code
+app.post('/api/auth/consume-password-reset-code', (req, res) => {
+  const { email } = req.body;
+  if (email) {
+    const normEmail = email.trim().toLowerCase();
+    passwordResetCodesMap.delete(normEmail);
+  }
+  res.json({ success: true });
+});
+
 // Email Service: Send Direct Email
 app.post('/api/email/send', async (req, res) => {
   try {
@@ -193,7 +324,7 @@ app.post('/api/email/send', async (req, res) => {
 // ENFORCES: Automatic emails are strictly dispatched only to validated email addresses
 app.post('/api/email/send-confirmation', async (req, res) => {
   try {
-    const payload: ConfirmationPayload & { recipientEmailVerified?: boolean } = req.body;
+    const payload: ConfirmationPayload & { recipientEmailVerified?: boolean; recipientUserId?: string } = req.body;
     if (!payload.recipientEmail || !payload.type) {
       return res.status(400).json({ success: false, error: 'Campos obrigatórios: recipientEmail, type' });
     }
@@ -202,14 +333,31 @@ app.post('/api/email/send-confirmation', async (req, res) => {
     const isEmailValidated = validatedEmailsSet.has(normEmail) || payload.recipientEmailVerified === true;
 
     // RULE: Enviar os emails automáticos apenas para emails validados
-    if (!isEmailValidated) {
+    // EXCEÇÃO CRÍTICA DE SEGURANÇA: Avisos de cancelamento de viagem (RIDE_CANCELLED), exclusão de passageiro (PASSENGER_REMOVED), início de viagem (RIDE_STARTED) e nova viagem no grupo (NEW_RIDE_GROUP)
+    const isPriorityAlert = payload.type === 'RIDE_CANCELLED' || payload.type === 'PASSENGER_REMOVED' || payload.type === 'RIDE_STARTED' || payload.type === 'NEW_RIDE_GROUP';
+    if (!isEmailValidated && !isPriorityAlert) {
       console.log(`ℹ️ [EMAIL GUARD] Envio automático IGNORADO para ${normEmail}: e-mail ainda não validado pelo usuário.`);
+      const skipLog = recordEmailDeliveryLog({
+        recipientEmail: normEmail,
+        recipientName: payload.recipientName,
+        recipientUserId: payload.recipientUserId,
+        type: payload.type,
+        subject: 'Notificação Automática CaronaFlow',
+        success: false,
+        simulated: false,
+        skipped: true,
+        reason: 'E-mail não validado no sistema. Notificações automáticas bloqueadas até validação de segurança.',
+        error: 'E-mail não validado. As notificações automáticas exigem validação prévia de e-mail.',
+      });
       return res.json({
-        success: true,
+        success: false,
         skipped: true,
         reason: 'E-mail não validado. As confirmações automáticas são disparadas exclusivamente para e-mails validados via contato@apponline.ia.br.',
         recipient: normEmail,
+        recipientUserId: payload.recipientUserId,
         type: payload.type,
+        error: 'E-mail não validado. Notificações por e-mail suspensas até validação.',
+        logId: skipLog.id,
       });
     }
 
@@ -222,19 +370,140 @@ app.post('/api/email/send-confirmation', async (req, res) => {
       replyTo: 'contato@apponline.ia.br',
     });
 
+    const deliveryLog = recordEmailDeliveryLog({
+      recipientEmail: normEmail,
+      recipientName: payload.recipientName,
+      recipientUserId: payload.recipientUserId,
+      type: payload.type,
+      subject,
+      success: result.success,
+      simulated: Boolean(result.simulated),
+      messageId: result.messageId,
+      error: result.error,
+    });
+
     res.json({
       success: result.success,
       type: payload.type,
       recipient: normEmail,
+      recipientUserId: payload.recipientUserId,
       simulated: result.simulated,
       messageId: result.messageId,
       error: result.error,
+      logId: deliveryLog.id,
     });
   } catch (error: any) {
     console.error('Error dispatching confirmation email:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 });
+
+// Email Monitoring: Get Delivery History & Status Logs
+app.get('/api/email/delivery-logs', (req, res) => {
+  const emailFilter = (req.query.email as string || '').trim().toLowerCase();
+  const userIdFilter = (req.query.userId as string || '').trim();
+  const filtered = emailDeliveryLogs.filter((l) => {
+    if (emailFilter && l.recipientEmail.toLowerCase() !== emailFilter) return false;
+    if (userIdFilter && l.recipientUserId !== userIdFilter) return false;
+    return true;
+  });
+
+  const total = filtered.length;
+  const successful = filtered.filter((l) => l.success).length;
+  const failed = filtered.filter((l) => !l.success || l.skipped).length;
+
+  res.json({
+    success: true,
+    logs: filtered.slice(0, 50),
+    summary: {
+      total,
+      successful,
+      failed,
+      deliveryRate: total > 0 ? Math.round((successful / total) * 100) : 100,
+    },
+  });
+});
+
+// Email Monitoring: Query Failed Delivery Records for Recipient
+app.get('/api/email/failures', (req, res) => {
+  const emailFilter = (req.query.email as string || '').trim().toLowerCase();
+  const userIdFilter = (req.query.userId as string || '').trim();
+
+  const failedLogs = emailDeliveryLogs.filter((l) => {
+    const isFail = !l.success || l.skipped === true;
+    if (!isFail) return false;
+    if (emailFilter && l.recipientEmail.toLowerCase() === emailFilter) return true;
+    if (userIdFilter && l.recipientUserId === userIdFilter) return true;
+    if (!emailFilter && !userIdFilter) return true;
+    return false;
+  });
+
+  res.json({
+    success: true,
+    failures: failedLogs.slice(0, 20),
+    hasFailures: failedLogs.length > 0,
+    count: failedLogs.length,
+  });
+});
+
+// Email Monitoring: Trigger Diagnostics / Test Delivery
+app.post('/api/email/test-delivery', async (req, res) => {
+  try {
+    const { email, userName } = req.body;
+    if (!email || !email.includes('@')) {
+      return res.status(400).json({ success: false, error: 'E-mail inválido ou não fornecido' });
+    }
+    const normEmail = email.trim().toLowerCase();
+    const isEmailValidated = validatedEmailsSet.has(normEmail);
+
+    const testSubject = '🧪 Teste de Notificação e Entrega de E-mail • CaronaFlow';
+    const testHtml = `
+      <div style="font-family: sans-serif; padding: 20px; color: #1e293b; max-width: 580px; margin: 0 auto; background: #ffffff; border: 1px solid #e2e8f0; border-radius: 16px;">
+        <h2 style="color: #4f46e5; margin-top: 0;">🧪 Diagnóstico de Entrega de E-mail CaronaFlow</h2>
+        <p>Olá, <strong>${userName || 'Membro CaronaFlow'}</strong>!</p>
+        <p>Este é um e-mail de teste disparado para confirmar se a sua caixa postal (<strong>${normEmail}</strong>) está recebendo as notificações do sistema normalmente.</p>
+        <div style="background: #f8fafc; padding: 16px; border-radius: 12px; margin: 18px 0; border: 1px solid #e2e8f0;">
+          <p style="margin: 0; font-size: 13px;"><strong>Status de Validação:</strong> ${isEmailValidated ? '✅ Validado no Sistema' : '⚠️ Validação Pendente'}</p>
+          <p style="margin: 6px 0 0 0; font-size: 13px;"><strong>Data e Hora:</strong> ${new Date().toLocaleString('pt-BR')}</p>
+          <p style="margin: 6px 0 0 0; font-size: 13px;"><strong>Servidor:</strong> contato@apponline.ia.br</p>
+        </div>
+        <p style="font-size: 12px; color: #64748b; line-height: 1.5;">Se você recebeu este e-mail, as notificações do CaronaFlow estão operacionais para a sua conta.</p>
+      </div>
+    `;
+
+    const result = await sendEmail({
+      to: normEmail,
+      subject: testSubject,
+      html: testHtml,
+      from: '"CaronaFlow Diagnóstico" <contato@apponline.ia.br>',
+      replyTo: 'contato@apponline.ia.br',
+    });
+
+    const logEntry = recordEmailDeliveryLog({
+      recipientEmail: normEmail,
+      recipientName: userName,
+      type: 'DIAGNOSTIC_TEST',
+      subject: testSubject,
+      success: result.success,
+      simulated: Boolean(result.simulated),
+      messageId: result.messageId,
+      error: result.error,
+    });
+
+    res.json({
+      success: result.success,
+      simulated: result.simulated,
+      messageId: result.messageId,
+      error: result.error,
+      validated: isEmailValidated,
+      recipient: normEmail,
+      logId: logEntry.id,
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message || 'Erro ao realizar teste de entrega' });
+  }
+});
+
 
 // Google Maps Routes API Advanced simulation & calculations
 app.post('/api/routes/calculate', (req, res) => {

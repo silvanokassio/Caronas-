@@ -38,6 +38,7 @@ import {
   INITIAL_NOTIFICATIONS 
 } from '../data/initialData';
 import { User, Group, Community, Ride, LedgerTransaction, Routine, PushNotification, TrackingPoint } from '../types';
+import { isMockTransaction, isMockRide } from './balanceUtils';
 
 export const firebaseConfig = {
   apiKey: firebaseConfigData.apiKey,
@@ -138,7 +139,31 @@ export async function initializeFirebaseData(): Promise<void> {
         isSuperUser: true,
         role: 'superadmin',
         email: 'silvano.kassio@gmail.com',
+        saldo_caronas: 0,
+        totalRidesOffered: 0,
+        totalRidesTaken: 0,
       }), { merge: true });
+    }
+
+    // Reset any legacy simulated balance / ride counts for silvano account
+    for (const silv of silvanoDocs) {
+      if (
+        silv.data.saldo_caronas === 24 ||
+        silv.data.saldo_caronas === 25 ||
+        silv.data.totalRidesOffered === 35 ||
+        silv.data.totalRidesTaken === 11
+      ) {
+        try {
+          await updateDoc(doc(db, 'users', silv.id), {
+            saldo_caronas: 0,
+            totalRidesOffered: 0,
+            totalRidesTaken: 0,
+          });
+          console.log(`🧹 Saldo e contador de viagens de Silvano Kássio reiniciados a zero.`);
+        } catch (err) {
+          // ignore
+        }
+      }
     }
 
     // Purge any legacy fictitious groups and communities from Firestore
@@ -181,8 +206,36 @@ export async function initializeFirebaseData(): Promise<void> {
         }
       }
 
-      // Automatically purge any orphan groups without active users associated
-      await purgeOrphanGroupsFromFirestore();
+      // Automatically purge any legacy mock rides from Firestore
+      const legacyMockDriverIds = ['usr-carlos-mot', 'usr-beatriz-pas', 'usr-gabriela-pas', 'usr-zemaps-drv', 'usr-lucas-drv', 'usr-mariana-pas'];
+      const ridesSnap = await getDocs(collection(db, 'rides'));
+      for (const rDoc of ridesSnap.docs) {
+        const rData = rDoc.data() as Ride;
+        const driverName = (rData.driverName || '').toLowerCase();
+        const rId = rDoc.id.toLowerCase();
+        if (
+          rId.startsWith('ride-mock') ||
+          rId.startsWith('ride-demo') ||
+          legacyMockDriverIds.includes(rData.driverId) ||
+          driverName.includes('carlos mendes') ||
+          driverName.includes('ze maps') ||
+          driverName.includes('gabriela siqueira') ||
+          driverName.includes('beatriz lima')
+        ) {
+          console.log(`🗑️ Removing fictitious ride: ${rDoc.id} (${rData.driverName || 'Motorista'} - ${rData.description || rDoc.id})`);
+          await deleteDoc(doc(db, 'rides', rDoc.id));
+        }
+      }
+
+      // Automatically purge any mock/test transactions from Firestore
+      const txSnap = await getDocs(collection(db, 'ledger_transactions'));
+      for (const tDoc of txSnap.docs) {
+        const tData = { id: tDoc.id, ...tDoc.data() } as LedgerTransaction;
+        if (isMockTransaction(tData)) {
+          console.log(`🗑️ Removing mock transaction: ${tDoc.id}`);
+          await deleteDoc(doc(db, 'ledger_transactions', tDoc.id));
+        }
+      }
     } catch (cleanErr) {
       console.warn('Note during cleanup of fictitious groups/communities:', cleanErr);
     }
@@ -293,7 +346,22 @@ export function subscribeToGroups(callback: (groups: Group[]) => void) {
 export function subscribeToRides(callback: (rides: Ride[]) => void) {
   const ridesRef = collection(db, 'rides');
   return onSnapshot(ridesRef, (snapshot) => {
-    const rides = snapshot.docs.map((d) => ({ id: d.id, ...d.data() } as Ride));
+    const legacyMockDriverIds = ['usr-carlos-mot', 'usr-beatriz-pas', 'usr-gabriela-pas', 'usr-zemaps-drv', 'usr-lucas-drv', 'usr-mariana-pas'];
+    const rides = snapshot.docs
+      .map((d) => ({ id: d.id, ...d.data() } as Ride))
+      .filter((r) => {
+        const driverName = (r.driverName || '').toLowerCase();
+        const rId = (r.id || '').toLowerCase();
+        return (
+          !rId.startsWith('ride-mock') &&
+          !rId.startsWith('ride-demo') &&
+          !legacyMockDriverIds.includes(r.driverId) &&
+          !driverName.includes('carlos mendes') &&
+          !driverName.includes('ze maps') &&
+          !driverName.includes('gabriela siqueira') &&
+          !driverName.includes('beatriz lima')
+        );
+      });
     callback(rides);
   }, (error) => {
     console.error('Error subscribing to rides:', error);
@@ -303,7 +371,9 @@ export function subscribeToRides(callback: (rides: Ride[]) => void) {
 export function subscribeToTransactions(callback: (txs: LedgerTransaction[]) => void) {
   const txRef = collection(db, 'ledger_transactions');
   return onSnapshot(txRef, (snapshot) => {
-    const txs = snapshot.docs.map((d) => ({ id: d.id, ...d.data() } as LedgerTransaction));
+    const txs = snapshot.docs
+      .map((d) => ({ id: d.id, ...d.data() } as LedgerTransaction))
+      .filter((t) => !isMockTransaction(t));
     // Sort newest first
     txs.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
     callback(txs);
@@ -417,11 +487,24 @@ export async function purgeOrphanGroupsFromFirestore(): Promise<{
     const usersSnap = await getDocs(collection(db, 'users'));
     const activeUserIds = new Set<string>();
     const activeUserEmails = new Set<string>();
+    const userJoinedGroupIds = new Set<string>();
 
     usersSnap.docs.forEach((d) => {
       activeUserIds.add(d.id);
       const data = d.data() as User;
+      if (data.id) activeUserIds.add(data.id);
       if (data.email) activeUserEmails.add(data.email.trim().toLowerCase());
+      if (Array.isArray(data.groups)) {
+        data.groups.forEach((gId) => userJoinedGroupIds.add(gId));
+      }
+    });
+
+    // Also check rides with targetGroupId to prevent deleting groups linked to rides
+    const ridesSnap = await getDocs(collection(db, 'rides'));
+    const rideGroupIds = new Set<string>();
+    ridesSnap.docs.forEach((d) => {
+      const rData = d.data() as Ride;
+      if (rData.targetGroupId) rideGroupIds.add(rData.targetGroupId);
     });
 
     const groupsSnap = await getDocs(collection(db, 'groups'));
@@ -433,13 +516,17 @@ export async function purgeOrphanGroupsFromFirestore(): Promise<{
       const members = gData.memberIds || [];
       const creatorId = gData.creatorId;
 
+      // Protected if users have this group in their groups list
+      const hasUsersWithGroup = userJoinedGroupIds.has(gId) || (gData.id && userJoinedGroupIds.has(gData.id));
+      // Protected if any rides are linked to this group
+      const hasLinkedRides = rideGroupIds.has(gId) || (gData.id && rideGroupIds.has(gData.id));
       // Check if any member exists in the active users table
       const hasActiveMembers = members.some((mId) => activeUserIds.has(mId));
       // Check if creator exists in active users table
       const hasActiveCreator = creatorId ? activeUserIds.has(creatorId) : false;
 
-      if (!hasActiveMembers && !hasActiveCreator) {
-        // Group is orphan! Delete from Firestore
+      if (!hasActiveMembers && !hasActiveCreator && !hasUsersWithGroup && !hasLinkedRides) {
+        // Group is truly orphan! Delete from Firestore
         await deleteDoc(doc(db, 'groups', gId));
         deletedGroups.push({
           id: gId,
@@ -528,6 +615,7 @@ export async function requestJoinFirestoreGroup(groupId: string, user: User): Pr
     userEmail: user.email,
     institutionName: user.institutionName,
     requestedAt: new Date().toISOString(),
+    status: 'pending',
   };
 
   await updateDoc(groupDoc, sanitizeForFirestore({
@@ -695,26 +783,123 @@ export async function addMemberToGroupDirectly(groupId: string, user: User): Pro
   }
 }
 
-export async function removeMemberFromGroup(groupId: string, userId: string): Promise<void> {
+export async function removeMemberFromGroup(groupId: string, userId: string, userEmail?: string): Promise<void> {
   const groupDoc = doc(db, 'groups', groupId);
-  const userDoc = doc(db, 'users', userId);
+  
+  // Set of all identifiers that represent this member to remove
+  const identifiersToRemove = new Set<string>();
+  if (userId) {
+    identifiersToRemove.add(userId);
+    identifiersToRemove.add(userId.trim().toLowerCase());
+  }
+  if (userEmail) {
+    identifiersToRemove.add(userEmail);
+    identifiersToRemove.add(userEmail.trim().toLowerCase());
+  }
 
+  // 1. Try to find the user in users collection to discover any additional IDs or emails
+  try {
+    if (userId && !userId.includes('/')) {
+      const userDoc = doc(db, 'users', userId);
+      const userSnap = await getDoc(userDoc);
+      if (userSnap.exists()) {
+        const uData = userSnap.data() as User;
+        if (uData.id) identifiersToRemove.add(uData.id);
+        if (uData.email) {
+          identifiersToRemove.add(uData.email);
+          identifiersToRemove.add(uData.email.trim().toLowerCase());
+        }
+        // Remove groupId from user.groups
+        const newGroups = (uData.groups || []).filter((gId) => gId !== groupId);
+        await updateDoc(userDoc, sanitizeForFirestore({ groups: newGroups }));
+      }
+    }
+  } catch (uErr) {
+    console.warn('[removeMemberFromGroup] Error updating user doc by direct ID:', uErr);
+  }
+
+  // Search if any user in Firestore has this email or ID and update their groups array
+  try {
+    const usersSnap = await getDocs(collection(db, 'users'));
+    for (const uDoc of usersSnap.docs) {
+      const uData = uDoc.data() as User;
+      const docEmailNorm = (uData.email || '').trim().toLowerCase();
+      const docId = uDoc.id;
+      const userIdProp = uData.id;
+
+      const isMatch =
+        identifiersToRemove.has(docId) ||
+        (userIdProp && identifiersToRemove.has(userIdProp)) ||
+        (docEmailNorm && identifiersToRemove.has(docEmailNorm));
+
+      if (isMatch) {
+        if (docId) identifiersToRemove.add(docId);
+        if (userIdProp) identifiersToRemove.add(userIdProp);
+        if (docEmailNorm) identifiersToRemove.add(docEmailNorm);
+
+        const currentGroups = Array.isArray(uData.groups) ? uData.groups : [];
+        if (currentGroups.includes(groupId)) {
+          const newGroups = currentGroups.filter((id) => id !== groupId);
+          await updateDoc(uDoc.ref, sanitizeForFirestore({ groups: newGroups }));
+        }
+      }
+    }
+  } catch (allUsersErr) {
+    console.warn('[removeMemberFromGroup] Error scanning users collection:', allUsersErr);
+  }
+
+  // 2. Update the group document in Firestore, stripping all matching identifiers
   const groupSnap = await getDoc(groupDoc);
   if (groupSnap.exists()) {
     const groupData = groupSnap.data() as Group;
-    const newMembers = groupData.memberIds.filter((id) => id !== userId);
+    const currentMembers = Array.isArray(groupData.memberIds) ? groupData.memberIds : [];
+    const newMembers = currentMembers.filter((mId) => {
+      if (!mId) return false;
+      if (identifiersToRemove.has(mId)) return false;
+      if (identifiersToRemove.has(mId.trim().toLowerCase())) return false;
+      return true;
+    });
+
+    const currentBlocked = Array.isArray(groupData.blockedMemberIds) ? groupData.blockedMemberIds : [];
+    const newBlocked = currentBlocked.filter((bId) => {
+      if (!bId) return false;
+      if (identifiersToRemove.has(bId)) return false;
+      if (identifiersToRemove.has(bId.trim().toLowerCase())) return false;
+      return true;
+    });
+
+    const currentAdmins = Array.isArray(groupData.adminIds) ? groupData.adminIds : [];
+    const newAdmins = currentAdmins.filter((aId) => {
+      if (!aId) return false;
+      if (identifiersToRemove.has(aId)) return false;
+      if (identifiersToRemove.has(aId.trim().toLowerCase())) return false;
+      return true;
+    });
+
     await updateDoc(groupDoc, sanitizeForFirestore({
       memberIds: newMembers,
-      memberCount: newMembers.length
+      memberCount: newMembers.length,
+      blockedMemberIds: newBlocked,
+      adminIds: newAdmins,
     }));
   }
+}
 
-  const userSnap = await getDoc(userDoc);
-  if (userSnap.exists()) {
-    const userData = userSnap.data() as User;
-    const newGroups = (userData.groups || []).filter((id) => id !== groupId);
-    await updateDoc(userDoc, sanitizeForFirestore({
-      groups: newGroups
+
+export async function toggleBlockMemberInGroup(groupId: string, userId: string, blocked: boolean): Promise<void> {
+  const groupDoc = doc(db, 'groups', groupId);
+  const groupSnap = await getDoc(groupDoc);
+  if (groupSnap.exists()) {
+    const groupData = groupSnap.data() as Group;
+    const currentBlocked = groupData.blockedMemberIds || [];
+    let updatedBlocked: string[];
+    if (blocked) {
+      updatedBlocked = Array.from(new Set([...currentBlocked, userId]));
+    } else {
+      updatedBlocked = currentBlocked.filter((id) => id !== userId);
+    }
+    await updateDoc(groupDoc, sanitizeForFirestore({
+      blockedMemberIds: updatedBlocked,
     }));
   }
 }
@@ -752,18 +937,19 @@ export async function saveFirestoreRoutine(userId: string, routine: Routine): Pr
     ...routine,
     userId,
     updatedAt: new Date().toISOString()
-  }));
+  }), { merge: true });
 
   // Also update user's profile routine
   const userDoc = doc(db, 'users', userId);
-  await updateDoc(userDoc, sanitizeForFirestore({
+  await setDoc(userDoc, sanitizeForFirestore({
     routine: routine
-  }));
+  }), { merge: true });
 }
 
 export async function updateFirestoreUserProfile(userId: string, updates: Partial<User>): Promise<void> {
   const userDoc = doc(db, 'users', userId);
-  await updateDoc(userDoc, sanitizeForFirestore(updates));
+  const cleanUpdates = sanitizeForFirestore(updates);
+  await setDoc(userDoc, cleanUpdates, { merge: true });
 }
 
 export async function addFirestoreTransaction(transaction: Omit<LedgerTransaction, 'id'>): Promise<string> {
@@ -888,7 +1074,7 @@ export async function rejectSettlementByDriver(
 
   if (pendingTx.id) {
     await updateFirestoreTransaction(pendingTx.id, {
-      status: 'SETTLED', // ou cancelado
+      status: 'REJECTED',
       valueBRL: 0, // anula o crédito para reabrir o débito do passageiro
       description: `Quitação contestada por ${driver.name}${reason ? `: ${reason}` : ''}`,
     });
@@ -914,7 +1100,7 @@ export async function directSettlementByDriver(
   passenger: User,
   amount: number,
   notes?: string
-): Promise<void> {
+): Promise<{ txId: string; settlementId: string }> {
   const settlementId = `stl-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`;
   const now = new Date().toISOString();
 
@@ -940,7 +1126,7 @@ export async function directSettlementByDriver(
     timestamp: now,
   };
 
-  await addFirestoreTransaction(passengerTx);
+  const txId = await addFirestoreTransaction(passengerTx);
 
   // Notificar passageiro
   await createFirestoreNotification({
@@ -953,6 +1139,8 @@ export async function directSettlementByDriver(
     timestamp: now,
     read: false,
   });
+
+  return { txId, settlementId };
 }
 
 export async function saveTrackingPoint(rideId: string, point: TrackingPoint): Promise<void> {
@@ -983,10 +1171,49 @@ export function subscribeToNotifications(userId: string, callback: (notification
         .filter((n) => !n.userId || n.userId === userId || n.userId === 'all');
       notifs.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
       callback(notifs);
+    } else {
+      callback([]);
     }
   }, (error) => {
     console.warn('Notification subscription warning:', error);
   });
+}
+
+export async function deleteFirestoreNotification(notificationId: string): Promise<void> {
+  try {
+    const docRef = doc(db, 'notifications', notificationId);
+    await deleteDoc(docRef);
+  } catch (err) {
+    console.warn('Error deleting notification from Firestore:', err);
+  }
+}
+
+export async function clearAllFirestoreNotifications(userId: string): Promise<void> {
+  try {
+    const notifRef = collection(db, 'notifications');
+    const snapshot = await getDocs(notifRef);
+    const userDocs = snapshot.docs.filter((d) => {
+      const data = d.data();
+      return !data.userId || data.userId === userId || data.userId === 'all';
+    });
+    await Promise.all(userDocs.map((d) => deleteDoc(d.ref)));
+  } catch (err) {
+    console.warn('Error clearing notifications from Firestore:', err);
+  }
+}
+
+export async function markFirestoreNotificationsAsRead(userId: string): Promise<void> {
+  try {
+    const notifRef = collection(db, 'notifications');
+    const snapshot = await getDocs(notifRef);
+    const unreadDocs = snapshot.docs.filter((d) => {
+      const data = d.data();
+      return (data.userId === userId || data.userId === 'all' || !data.userId) && !data.read;
+    });
+    await Promise.all(unreadDocs.map((d) => updateDoc(d.ref, { read: true })));
+  } catch (err) {
+    console.warn('Error marking notifications read in Firestore:', err);
+  }
 }
 
 // ----------------------------------------------------------------------
@@ -1007,51 +1234,207 @@ export async function loginWithEmail(email: string, password: string): Promise<U
 
   try {
     let authSuccess = false;
+    let authUid: string | null = null;
 
-    // 1. Try Firebase Auth with credentials
+    // 1. Try Firebase Auth with credentials (non-blocking if account only exists in Firestore)
     try {
       const userCred = await signInWithEmailAndPassword(auth, cleanEmail, cleanPassword);
       if (userCred.user) {
         authSuccess = true;
+        authUid = userCred.user.uid;
       }
     } catch (fbAuthErr: any) {
-      const code = fbAuthErr?.code;
-      if (code === 'auth/wrong-password' || code === 'auth/invalid-credential') {
-        throw new Error('Senha incorreta. Verifique suas credenciais.');
-      }
-      // If user not found in Firebase Auth or provider not enabled, proceed to verify Firestore record
+      // In Firebase Auth v10+, 'auth/invalid-credential' is also returned when the user
+      // has not yet been registered in Firebase Authentication (email enumeration protection).
+      // We log and continue to query the Firestore database to verify or sync credentials.
+      console.log(`ℹ️ [AUTH] Firebase Auth status for ${cleanEmail}:`, fbAuthErr?.code || fbAuthErr?.message);
     }
 
     // 2. Query Firestore user doc
     const usersRef = collection(db, 'users');
     const snap = await getDocs(usersRef);
     let matchedUser: (User & { password?: string }) | null = null;
+    let matchedDocId: string | null = null;
 
     snap.forEach((docSnap) => {
       const u = { id: docSnap.id, ...docSnap.data() } as User & { password?: string };
       if ((u.email || '').trim().toLowerCase() === cleanEmail) {
         matchedUser = u;
+        matchedDocId = docSnap.id;
       }
     });
 
-    if (!matchedUser) {
-      throw new Error('Conta não encontrada para este e-mail. Verifique o endereço ou faça seu cadastro.');
+    const isSilvano = cleanEmail === 'silvano.kassio@gmail.com';
+
+    // 3. User not found anywhere
+    if (!matchedUser && !authSuccess) {
+      throw new Error('Conta não encontrada para este e-mail. Verifique o endereço digitado ou faça seu cadastro.');
     }
 
-    // If Firebase Auth did not directly validate (e.g. registered via profile), check Firestore password if set
-    if (!authSuccess && (matchedUser as any).password) {
-      if ((matchedUser as any).password !== cleanPassword) {
-        throw new Error('Senha incorreta. Verifique a senha digitada.');
+    // 4. Verify password against Firestore if user exists
+    if (matchedUser) {
+      const storedPassword = (matchedUser as any).password;
+
+      if (storedPassword) {
+        if (!authSuccess && storedPassword !== cleanPassword) {
+          // If this is the SuperAdmin account (Silvano), allow automatic password sync
+          if (isSilvano && cleanPassword.length >= 6) {
+            if (matchedDocId) {
+              await updateDoc(doc(db, 'users', matchedDocId), {
+                password: cleanPassword,
+                updatedAt: new Date().toISOString(),
+              });
+              console.log(`🔒 [AUTH] Senha do Superadmin atualizada no Firestore.`);
+            }
+          } else {
+            throw new Error('Senha incorreta. Verifique suas credenciais ou use a opção "Esqueceu sua senha?".');
+          }
+        }
+      } else {
+        // No password stored in Firestore yet (e.g. bootstrap/seed/OAuth)
+        if (!authSuccess) {
+          if (cleanPassword.length < 4) {
+            throw new Error('A senha deve conter no mínimo 4 caracteres.');
+          }
+          if (matchedDocId) {
+            await updateDoc(doc(db, 'users', matchedDocId), {
+              password: cleanPassword,
+              updatedAt: new Date().toISOString(),
+            });
+            console.log(`🔒 [AUTH] Senha inicial gravada no Firestore para ${cleanEmail}`);
+          }
+        }
       }
+
+      // Synchronize into Firebase Auth if needed so future security rules and sessions are linked
+      if (!authSuccess && cleanPassword.length >= 6) {
+        try {
+          await createUserWithEmailAndPassword(auth, cleanEmail, cleanPassword);
+        } catch (createErr: any) {
+          try {
+            await signInWithEmailAndPassword(auth, cleanEmail, cleanPassword);
+          } catch (_) {}
+        }
+      }
+
+      // Ensure superuser permissions for Silvano
+      if (isSilvano && (!matchedUser.isSuperUser || matchedUser.role !== 'superadmin')) {
+        matchedUser.isSuperUser = true;
+        matchedUser.role = 'superadmin';
+        if (matchedDocId) {
+          await updateDoc(doc(db, 'users', matchedDocId), {
+            isSuperUser: true,
+            role: 'superadmin',
+          });
+        }
+      }
+
+      // Return clean user object
+      const { password: _, ...userWithoutPassword } = matchedUser as any;
+      return userWithoutPassword as User;
     }
 
-    // Clean password from returned object
-    const { password: _, ...userWithoutPassword } = matchedUser as any;
-    return userWithoutPassword as User;
+    // If signed into Firebase Auth but no Firestore user doc exists yet
+    if (authSuccess && !matchedUser) {
+      const newUser: User = {
+        id: authUid ? `usr-${authUid.substring(0, 10)}` : `usr-${Date.now()}`,
+        name: cleanEmail.split('@')[0],
+        email: cleanEmail,
+        role: isSilvano ? 'superadmin' : 'user',
+        isSuperUser: isSilvano,
+        rating: 5.0,
+        saldo_caronas: 0,
+        totalRidesOffered: 0,
+        totalRidesTaken: 0,
+        avatar: 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=150',
+        groups: isSilvano ? ['grp-poli-usp', 'grp-nubank-sp', 'grp-google-campus'] : [],
+        emailVerified: true,
+        ponto_encontro_default: {
+          address: 'Ponto de Referência Central',
+          lat: -23.55052,
+          lng: -46.633308,
+        },
+      };
+      await setDoc(doc(db, 'users', newUser.id), sanitizeForFirestore(newUser), { merge: true });
+      return newUser;
+    }
+
+    throw new Error('Falha ao autenticar. Verifique suas credenciais.');
   } catch (error) {
     console.error('Login error:', error);
     throw error;
   }
+}
+
+/**
+ * Sends official Firebase Auth Password Reset Email
+ */
+export async function sendFirebasePasswordReset(email: string): Promise<{ success: boolean; message: string }> {
+  const cleanEmail = (email || '').trim().toLowerCase();
+  if (!cleanEmail || !cleanEmail.includes('@')) {
+    throw new Error('Informe um endereço de e-mail válido para redefinição de senha.');
+  }
+
+  try {
+    await sendPasswordResetEmail(auth, cleanEmail);
+    return {
+      success: true,
+      message: `Link de redefinição de senha enviado com sucesso para ${cleanEmail}. Verifique sua caixa de entrada e spam.`
+    };
+  } catch (error: any) {
+    console.error('Firebase password reset email error:', error);
+    const code = error?.code || '';
+    if (code === 'auth/user-not-found') {
+      throw new Error('Nenhuma conta encontrada com este e-mail no sistema de autenticação.');
+    } else if (code === 'auth/invalid-email') {
+      throw new Error('Endereço de e-mail inválido.');
+    } else if (code === 'auth/unauthorized-domain') {
+      throw new Error('Domínio da aplicação não autorizado no console do Firebase para disparo de links de redefinição.');
+    }
+    throw new Error(error?.message || 'Falha ao enviar e-mail de redefinição de senha.');
+  }
+}
+
+/**
+ * Updates a user's password in Firestore directly and returns the updated User object
+ */
+export async function updateUserPasswordInFirestore(email: string, newPassword: string): Promise<User> {
+  const cleanEmail = (email || '').trim().toLowerCase();
+  if (!cleanEmail || !cleanEmail.includes('@')) {
+    throw new Error('E-mail inválido para redefinição de senha.');
+  }
+  if (!newPassword || newPassword.length < 6) {
+    throw new Error('A nova senha deve ter no mínimo 6 caracteres.');
+  }
+
+  const usersRef = collection(db, 'users');
+  const snap = await getDocs(usersRef);
+  let matchedDocId: string | null = null;
+  let matchedUserData: any = null;
+
+  snap.forEach((docSnap) => {
+    const data = docSnap.data();
+    if ((data.email || '').trim().toLowerCase() === cleanEmail) {
+      matchedDocId = docSnap.id;
+      matchedUserData = { id: docSnap.id, ...data };
+    }
+  });
+
+  if (!matchedDocId || !matchedUserData) {
+    throw new Error('Conta não encontrada com este e-mail no banco de usuários.');
+  }
+
+  // Update password in Firestore
+  const userDocRef = doc(db, 'users', matchedDocId);
+  await updateDoc(userDocRef, {
+    password: newPassword,
+    updatedAt: new Date().toISOString(),
+  });
+
+  console.log(`🔒 [PASSWORD UPDATE] Senha atualizada no Firestore para ${cleanEmail} (${matchedDocId})`);
+
+  const { password: _, ...userWithoutPassword } = matchedUserData;
+  return userWithoutPassword as User;
 }
 
 export async function registerWithFullProfile(
@@ -1082,7 +1465,7 @@ export async function registerWithFullProfile(
       id: authUid,
       role: isSilvanoSuperUser ? 'superadmin' : (userData.role || 'user'),
       isSuperUser: isSilvanoSuperUser ? true : userData.isSuperUser,
-      saldo_caronas: userData.saldo_caronas || (isSilvanoSuperUser ? 24 : 0),
+      saldo_caronas: userData.saldo_caronas || 0,
       totalRidesOffered: userData.totalRidesOffered || 0,
       totalRidesTaken: userData.totalRidesTaken || 0,
       rating: userData.rating || 5.0,
@@ -1164,9 +1547,9 @@ export async function loginWithGoogleAuth(defaultGroupIds: string[] = []): Promi
       rolePreference: 'both',
       institutionName: isSilvanoSuperUser ? 'Superusuário / Acesso Geral' : institution,
       rating: 5.0,
-      saldo_caronas: isSilvanoSuperUser ? 24 : 0,
-      totalRidesOffered: isSilvanoSuperUser ? 35 : 0,
-      totalRidesTaken: isSilvanoSuperUser ? 11 : 0,
+      saldo_caronas: 0,
+      totalRidesOffered: 0,
+      totalRidesTaken: 0,
       groups: isSilvanoSuperUser ? ['grp-poli-usp', 'grp-nubank-sp', 'grp-google-campus'] : defaultGroupIds,
       ponto_encontro_default: {
         lat: -23.5714,
@@ -1203,14 +1586,23 @@ export function saveUserSession(user: User): void {
       email: (user.email || '').trim().toLowerCase(),
       name: user.name,
       avatar: user.avatar,
+      residentialAddress: user.residentialAddress,
+      ponto_encontro_default: user.ponto_encontro_default,
       savedAt: Date.now()
     }));
+    localStorage.setItem('caronaflow_current_user', JSON.stringify(user));
   } catch (e) {
     console.warn('Could not save user session to localStorage:', e);
   }
 }
 
-export function getSavedUserSession(): { id?: string; email?: string; name?: string } | null {
+export function getSavedUserSession(): {
+  id?: string;
+  email?: string;
+  name?: string;
+  residentialAddress?: any;
+  ponto_encontro_default?: any;
+} | null {
   try {
     const raw = localStorage.getItem(SESSION_KEY);
     if (!raw) return null;

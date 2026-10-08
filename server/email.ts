@@ -142,7 +142,7 @@ export function buildHtmlEmailTemplate({
   };
   footerNote?: string;
 }): string {
-  const appUrl = process.env.APP_URL || 'https://caronaflow.app';
+  const appUrl = process.env.APP_URL || 'https://caronasflow.apponline.ia.br';
   const buttonUrl = actionButton?.url || appUrl;
 
   return `

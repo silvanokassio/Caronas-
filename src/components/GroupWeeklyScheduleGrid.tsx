@@ -14,9 +14,12 @@ import {
   ShieldCheck, 
   X, 
   Lock,
-  Users
+  Users,
+  UserX
 } from 'lucide-react';
-import { Group, Ride, User, isSuperUser } from '../types';
+import { Group, Ride, User, isSuperUser, isUserMemberOfGroup, PassengerParticipant } from '../types';
+import { canJoinRide, canLeaveRide } from '../lib/dateUtils';
+import { RemovePassengerModal } from './RemovePassengerModal';
 
 interface GroupWeeklyScheduleGridProps {
   group: Group;
@@ -26,7 +29,8 @@ interface GroupWeeklyScheduleGridProps {
   onQuickCreateRide: (dayDateStr: string, group: Group) => void;
   onQuickBookSeat: (rideId: string) => void;
   onQuickCancelSeat: (rideId: string, userId: string) => void;
-  onCancelRide?: (rideId: string) => void;
+  onRemovePassenger?: (rideId: string, passengerUserId: string, justification: string) => Promise<void> | void;
+  onCancelRide?: (rideId: string, reason?: string) => void;
   onNavigateToRideEdit?: (ride: Ride) => void;
   onOpenAuth?: (mode?: 'login' | 'register') => void;
 }
@@ -39,6 +43,7 @@ export const GroupWeeklyScheduleGrid: React.FC<GroupWeeklyScheduleGridProps> = (
   onQuickCreateRide,
   onQuickBookSeat,
   onQuickCancelSeat,
+  onRemovePassenger,
   onCancelRide,
   onNavigateToRideEdit,
   onOpenAuth,
@@ -46,10 +51,15 @@ export const GroupWeeklyScheduleGrid: React.FC<GroupWeeklyScheduleGridProps> = (
   // Offset in weeks from today: 0 = current week, 1 = next week, etc.
   const [weekOffset, setWeekOffset] = useState<number>(0);
 
+  // State for passenger removal modal
+  const [passengerToRemove, setPassengerToRemove] = useState<{
+    ride: Ride;
+    passenger: PassengerParticipant;
+  } | null>(null);
+
   const isMember = useMemo(() => {
-    if (!currentUser) return false;
-    return isSuperUser(currentUser) || group.memberIds.includes(currentUser.id) || group.creatorId === currentUser.id;
-  }, [currentUser, group]);
+    return isUserMemberOfGroup(group, currentUser, allUsers);
+  }, [currentUser, group, allUsers]);
 
   const isDriverEligible = useMemo(() => {
     if (!currentUser) return false;
@@ -221,8 +231,12 @@ export const GroupWeeklyScheduleGrid: React.FC<GroupWeeklyScheduleGridProps> = (
                     >
                       {ride ? (
                         <div className="flex flex-col items-center space-y-1">
-                          <div className="flex items-center space-x-1.5 bg-indigo-50 border border-indigo-200/80 rounded-xl px-2.5 py-1.5 shadow-2xs max-w-full truncate">
-                            <span className="font-bold text-indigo-950 truncate max-w-[100px] sm:max-w-[120px]">
+                          <div className={`flex items-center space-x-1.5 border rounded-xl px-2.5 py-1.5 shadow-2xs max-w-full truncate ${
+                            ride.status === 'concluida' 
+                              ? 'bg-slate-100 border-slate-300 text-slate-600' 
+                              : 'bg-indigo-50 border-indigo-200/80 text-indigo-950'
+                          }`}>
+                            <span className="font-bold truncate max-w-[100px] sm:max-w-[120px]">
                               {ride.driverName}
                             </span>
                             {isUserDriver && (
@@ -240,7 +254,12 @@ export const GroupWeeklyScheduleGrid: React.FC<GroupWeeklyScheduleGridProps> = (
                               R$ {ride.price.toFixed(2)}
                             </span>
                           </div>
-                          {isUserDriver && (
+                          {ride.status === 'concluida' && (
+                            <span className="text-[9px] font-bold uppercase tracking-wider text-slate-500 bg-slate-200/80 px-2 py-0.5 rounded-md">
+                              Viagem Concluída
+                            </span>
+                          )}
+                          {isUserDriver && !day.isPast && canLeaveRide(ride) && (
                             <div className="flex items-center space-x-2 pt-0.5 text-[10px]">
                               {onNavigateToRideEdit && (
                                 <button
@@ -256,11 +275,17 @@ export const GroupWeeklyScheduleGrid: React.FC<GroupWeeklyScheduleGridProps> = (
                                 <button
                                   type="button"
                                   onClick={() => {
-                                    if (confirm('Tem certeza que deseja cancelar esta carona do grupo?')) {
-                                      onCancelRide(ride.id);
+                                    const passengerCount = (ride.acceptedPassengers || []).length;
+                                    const confirmMsg = passengerCount > 0
+                                      ? `Tem certeza que deseja cancelar esta carona do grupo? ${passengerCount} passageiro(s) confirmados receberão notificação push e e-mail imediatamente.`
+                                      : 'Tem certeza que deseja cancelar esta carona do grupo?';
+                                    if (confirm(confirmMsg)) {
+                                      const reason = passengerCount > 0 ? (prompt('Motivo do cancelamento (opcional, será enviado por push e e-mail aos passageiros):') || '') : '';
+                                      onCancelRide(ride.id, reason.trim() || undefined);
                                     }
                                   }}
                                   className="text-rose-600 hover:text-rose-700 underline px-1 py-0.5 hover:bg-rose-50 rounded transition cursor-pointer"
+                                  title="Cancelar viagem e avisar passageiros"
                                 >
                                   Cancelar
                                 </button>
@@ -320,7 +345,8 @@ export const GroupWeeklyScheduleGrid: React.FC<GroupWeeklyScheduleGridProps> = (
                       const isCurrentUserPassenger = currentUser && passenger?.userId === currentUser.id;
                       const isCurrentUserDriver = currentUser && ride?.driverId === currentUser.id;
                       const userAlreadyBooked = currentUser && ride?.acceptedPassengers?.some((p) => p.userId === currentUser.id);
-                      const isSeatAvailable = !!ride && slotIdx < ride.totalSeats && !passenger;
+                      const isPastOrConcluded = day.isPast || (ride ? !canJoinRide(ride) : false);
+                      const isSeatAvailable = !!ride && slotIdx < ride.totalSeats && !passenger && !isPastOrConcluded;
 
                       return (
                         <td
@@ -347,7 +373,7 @@ export const GroupWeeklyScheduleGrid: React.FC<GroupWeeklyScheduleGridProps> = (
                               <span className="font-semibold text-slate-800 bg-slate-100 border border-slate-200/80 px-2 py-1 rounded-lg text-xs truncate max-w-[110px]">
                                 {passenger.userName}
                               </span>
-                              {isCurrentUserPassenger && (
+                              {isCurrentUserPassenger && !day.isPast && canLeaveRide(ride) && (
                                 <button
                                   type="button"
                                   onClick={() => onQuickCancelSeat(ride.id, passenger.userId)}
@@ -355,6 +381,16 @@ export const GroupWeeklyScheduleGrid: React.FC<GroupWeeklyScheduleGridProps> = (
                                   className="p-1 text-slate-400 hover:text-rose-600 rounded-md hover:bg-rose-50 transition cursor-pointer"
                                 >
                                   <X className="w-3 h-3" />
+                                </button>
+                              )}
+                              {isCurrentUserDriver && !day.isPast && canLeaveRide(ride) && onRemovePassenger && (
+                                <button
+                                  type="button"
+                                  onClick={() => setPassengerToRemove({ ride, passenger })}
+                                  title={`Excluir passageiro(a) ${passenger.userName} da viagem com justificativa por push e e-mail`}
+                                  className="p-1 text-slate-400 hover:text-rose-600 rounded-md hover:bg-rose-50 transition cursor-pointer"
+                                >
+                                  <UserX className="w-3 h-3 text-rose-500" />
                                 </button>
                               )}
                             </div>
@@ -425,6 +461,24 @@ export const GroupWeeklyScheduleGrid: React.FC<GroupWeeklyScheduleGridProps> = (
           Destino Padrão: {group.defaultDestination?.name || group.defaultDestination?.address}
         </div>
       </div>
+
+      {/* Modal de Exclusão de Passageiro da Vaga (com Justificativa por Push e E-mail) */}
+      <RemovePassengerModal
+        isOpen={Boolean(passengerToRemove)}
+        onClose={() => setPassengerToRemove(null)}
+        ride={passengerToRemove?.ride || null}
+        passenger={passengerToRemove?.passenger || null}
+        passengerUser={
+          passengerToRemove?.passenger && allUsers
+            ? allUsers.find((u) => u.id === passengerToRemove.passenger.userId)
+            : null
+        }
+        onConfirmRemove={async (rideId, passengerUserId, justification) => {
+          if (onRemovePassenger) {
+            await onRemovePassenger(rideId, passengerUserId, justification);
+          }
+        }}
+      />
     </div>
   );
 };

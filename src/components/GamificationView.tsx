@@ -42,13 +42,15 @@ import {
   Info,
   CheckCheck
 } from 'lucide-react';
-import { User, LedgerTransaction, Ride } from '../types';
+import { User, LedgerTransaction, Ride, Group } from '../types';
+import { isMockRide, isMockTransaction, isRideEligibleForRealBalance, isUserEligibleForColleagueSearch } from '../lib/balanceUtils';
 
 interface GamificationViewProps {
   currentUser: User | null;
   allUsers?: User[];
   ledger: LedgerTransaction[];
   rides?: Ride[];
+  groups?: Group[];
   onSelectUser?: (user: User) => void;
   onOpenAuth?: (mode?: 'login' | 'register') => void;
   onAddTransaction?: (
@@ -112,6 +114,7 @@ export const GamificationView: React.FC<GamificationViewProps> = ({
   allUsers = [],
   ledger,
   rides = [],
+  groups = [],
   onSelectUser,
   onOpenAuth,
   onAddTransaction,
@@ -227,14 +230,24 @@ export const GamificationView: React.FC<GamificationViewProps> = ({
   // Active user is strictly currentUser
   const user = currentUser;
 
-  // Transactions strictly belonging to currentUser (or where currentUser is driver/passenger/counterpart)
-  const userTransactions = ledger.filter(
-    (t) =>
-      t.userId === user.id ||
-      t.driverId === user.id ||
-      t.passengerId === user.id ||
-      t.counterpartId === user.id
-  );
+  // Transactions strictly belonging to currentUser
+  const userTransactions = ledger.filter((t) => {
+    if (t.userId === user.id) return true;
+    if (t.type === 'OFFERED_RIDE') {
+      return t.driverId === user.id;
+    }
+    if (t.type === 'RECEIVED_RIDE') {
+      return t.passengerId === user.id;
+    }
+    if (t.type === 'SETTLEMENT' || t.type === 'PIX_TRANSFER') {
+      return (
+        t.counterpartId === user.id ||
+        t.driverId === user.id ||
+        t.passengerId === user.id
+      );
+    }
+    return false;
+  });
 
   // Compute calculated financial totals for currentUser
   const totalCreditsBRL = userTransactions
@@ -426,29 +439,55 @@ export const GamificationView: React.FC<GamificationViewProps> = ({
   };
 
   // BILATERAL NETTING ENGINE (INDIVIDUALIZAÇÃO E COMPENSAÇÃO RECÍPROCA DE SALDOS)
+  // Exclui lançamentos de teste (mockados) e considera apenas viagens elegíveis (concluídas ou de dias passados)
+  const cleanLedger = ledger.filter((t) => !isMockTransaction(t));
+  const cleanEligibleRides = rides.filter((r) => !isMockRide(r) && isRideEligibleForRealBalance(r));
+
   const bilateralNettingList: BilateralNettingRecord[] = allUsers
     .filter((otherUser) => otherUser.id !== currentUser.id)
     .map((otherUser) => {
       // 1. Caronas onde currentUser foi MOTORISTA e otherUser foi PASSAGEIRO (Gera CRÉDITO para currentUser)
-      // Verifica transações no ledger onde currentUser era motorista e otherUser passageiro
-      const driverRidesFromLedger = ledger.filter(
-        (t) =>
-          ((t.userId === currentUser.id && t.type === 'OFFERED_RIDE') ||
-            (t.userId === otherUser.id && t.type === 'RECEIVED_RIDE')) &&
-          (t.counterpartId === otherUser.id ||
-            t.passengerId === otherUser.id ||
-            t.counterpartId === currentUser.id ||
-            t.driverId === currentUser.id ||
-            (t.counterpartName && t.counterpartName.toLowerCase().includes(otherUser.name.toLowerCase())))
-      );
-
-      const driverRidesFromRidesList = rides.filter(
+      const driverRidesFromRidesList = cleanEligibleRides.filter(
         (r) =>
           r.driverId === currentUser.id &&
           r.acceptedPassengers?.some((p) => p.userId === otherUser.id)
       );
 
       const driverRidesMap = new Map<string, { id: string; rideId?: string; description: string; date: string; value: number }>();
+
+      driverRidesFromRidesList.forEach((r) => {
+        const pass = r.acceptedPassengers?.find((p) => p.userId === otherUser.id);
+        const val = pass?.agreedPrice ?? r.price ?? 6.50;
+        driverRidesMap.set(r.id, {
+          id: `ride-${r.id}-${otherUser.id}`,
+          rideId: r.id,
+          description: `Carona: ${r.origin.name} ➔ ${r.destination.name} (Passageiro: ${otherUser.name})`,
+          date: r.date || new Date().toISOString(),
+          value: val,
+        });
+      });
+
+      // Transações no ledger onde currentUser era motorista e otherUser passageiro
+      const driverRidesFromLedger = cleanLedger.filter((t) => {
+        if (t.type === 'RECEIVED_RIDE') {
+          const isOtherPassenger = t.userId === otherUser.id || t.passengerId === otherUser.id;
+          const isCurrentDriver =
+            t.driverId === currentUser.id ||
+            t.counterpartId === currentUser.id ||
+            (t.counterpartName && currentUser.name && t.counterpartName.toLowerCase().includes(currentUser.name.toLowerCase()));
+          return isOtherPassenger && isCurrentDriver;
+        }
+        if (t.type === 'OFFERED_RIDE') {
+          const isCurrentDriver = t.userId === currentUser.id || t.driverId === currentUser.id;
+          const isOtherPassenger =
+            t.passengerId === otherUser.id ||
+            t.counterpartId === otherUser.id ||
+            (t.counterpartName && otherUser.name && t.counterpartName.toLowerCase().includes(otherUser.name.toLowerCase()));
+          return isCurrentDriver && isOtherPassenger;
+        }
+        return false;
+      });
+
       driverRidesFromLedger.forEach((t) => {
         const key = t.rideId || t.id;
         if (!driverRidesMap.has(key)) {
@@ -463,43 +502,51 @@ export const GamificationView: React.FC<GamificationViewProps> = ({
         }
       });
 
-      driverRidesFromRidesList.forEach((r) => {
-        if (!driverRidesMap.has(r.id)) {
-          const pass = r.acceptedPassengers.find((p) => p.userId === otherUser.id);
-          const val = pass?.agreedPrice ?? r.price ?? 6.50;
-          driverRidesMap.set(r.id, {
-            id: `ride-${r.id}-${otherUser.id}`,
-            rideId: r.id,
-            description: `Carona: ${r.origin.name} ➔ ${r.destination.name} (Passageiro: ${otherUser.name})`,
-            date: r.date || new Date().toISOString(),
-            value: val,
-          });
-        }
-      });
-
       const driverRides = Array.from(driverRidesMap.values());
       const totalCreditsAsDriver = driverRides.reduce((sum, r) => sum + r.value, 0);
 
       // 2. Caronas onde otherUser foi MOTORISTA e currentUser foi PASSAGEIRO (Gera DÉBITO para currentUser)
-      // Verifica transações no ledger onde otherUser era motorista e currentUser passageiro
-      const passengerRidesFromLedger = ledger.filter(
-        (t) =>
-          ((t.userId === currentUser.id && t.type === 'RECEIVED_RIDE') ||
-            (t.userId === otherUser.id && t.type === 'OFFERED_RIDE')) &&
-          (t.counterpartId === otherUser.id ||
-            t.driverId === otherUser.id ||
-            t.counterpartId === currentUser.id ||
-            t.passengerId === currentUser.id ||
-            (t.counterpartName && t.counterpartName.toLowerCase().includes(otherUser.name.toLowerCase())))
-      );
-
-      const passengerRidesFromRidesList = rides.filter(
+      const passengerRidesFromRidesList = cleanEligibleRides.filter(
         (r) =>
           r.driverId === otherUser.id &&
           r.acceptedPassengers?.some((p) => p.userId === currentUser.id)
       );
 
       const passengerRidesMap = new Map<string, { id: string; rideId?: string; description: string; date: string; value: number }>();
+
+      passengerRidesFromRidesList.forEach((r) => {
+        const pass = r.acceptedPassengers?.find((p) => p.userId === currentUser.id);
+        const val = pass?.agreedPrice ?? r.price ?? 6.50;
+        passengerRidesMap.set(r.id, {
+          id: `ride-${r.id}-${currentUser.id}`,
+          rideId: r.id,
+          description: `Carona: ${r.origin.name} ➔ ${r.destination.name} (Motorista: ${otherUser.name})`,
+          date: r.date || new Date().toISOString(),
+          value: val,
+        });
+      });
+
+      // Transações no ledger onde otherUser era motorista e currentUser passageiro
+      const passengerRidesFromLedger = cleanLedger.filter((t) => {
+        if (t.type === 'RECEIVED_RIDE') {
+          const isCurrentPassenger = t.userId === currentUser.id || t.passengerId === currentUser.id;
+          const isOtherDriver =
+            t.driverId === otherUser.id ||
+            t.counterpartId === otherUser.id ||
+            (t.counterpartName && otherUser.name && t.counterpartName.toLowerCase().includes(otherUser.name.toLowerCase()));
+          return isCurrentPassenger && isOtherDriver;
+        }
+        if (t.type === 'OFFERED_RIDE') {
+          const isOtherDriver = t.userId === otherUser.id || t.driverId === otherUser.id;
+          const isCurrentPassenger =
+            t.passengerId === currentUser.id ||
+            t.counterpartId === currentUser.id ||
+            (t.counterpartName && currentUser.name && t.counterpartName.toLowerCase().includes(currentUser.name.toLowerCase()));
+          return isOtherDriver && isCurrentPassenger;
+        }
+        return false;
+      });
+
       passengerRidesFromLedger.forEach((t) => {
         const key = t.rideId || t.id;
         if (!passengerRidesMap.has(key)) {
@@ -514,25 +561,11 @@ export const GamificationView: React.FC<GamificationViewProps> = ({
         }
       });
 
-      passengerRidesFromRidesList.forEach((r) => {
-        if (!passengerRidesMap.has(r.id)) {
-          const pass = r.acceptedPassengers.find((p) => p.userId === currentUser.id);
-          const val = pass?.agreedPrice ?? r.price ?? 6.50;
-          passengerRidesMap.set(r.id, {
-            id: `ride-${r.id}-${currentUser.id}`,
-            rideId: r.id,
-            description: `Carona: ${r.origin.name} ➔ ${r.destination.name} (Motorista: ${otherUser.name})`,
-            date: r.date || new Date().toISOString(),
-            value: val,
-          });
-        }
-      });
-
       const passengerRides = Array.from(passengerRidesMap.values());
       const totalDebitsAsPassenger = passengerRides.reduce((sum, r) => sum + r.value, 0);
 
       // 3. Acertos PIX & Quitações entre currentUser e otherUser
-      const pixTransactions = ledger.filter((t) => {
+      const rawPixTransactions = cleanLedger.filter((t) => {
         if (t.type !== 'PIX_TRANSFER' && t.type !== 'SETTLEMENT') return false;
         const isPair =
           (t.userId === currentUser.id &&
@@ -548,28 +581,114 @@ export const GamificationView: React.FC<GamificationViewProps> = ({
         return isPair;
       });
 
-      const pixPaidToUser = pixTransactions
-        .filter(
-          (t) =>
-            (t.userId === currentUser.id && (t.valueBRL ?? 0) < 0) ||
-            (t.passengerId === currentUser.id && t.status === 'COMPLETED')
-        )
-        .reduce((sum, t) => sum + Math.abs(t.valueBRL ?? 6.50), 0);
+      // Deduplicate transactions by settlementId or by id to prevent duplicate state counting
+      const uniquePixMap = new Map<string, LedgerTransaction>();
+      rawPixTransactions.forEach((t) => {
+        const key = t.settlementId ? `settlement-${t.settlementId}` : t.id;
+        if (!uniquePixMap.has(key)) {
+          uniquePixMap.set(key, t);
+        }
+      });
+      const pixTransactions = Array.from(uniquePixMap.values());
 
-      const pixReceivedFromUser = pixTransactions
-        .filter(
-          (t) =>
-            (t.userId === currentUser.id && (t.valueBRL ?? 0) > 0 && t.status === 'COMPLETED') ||
-            (t.driverId === currentUser.id && t.status === 'COMPLETED')
-        )
-        .reduce((sum, t) => sum + Math.abs(t.valueBRL ?? 6.50), 0);
+      let pixPaidToUser = 0;
+      let pixReceivedFromUser = 0;
+      let settlementPaid = 0;
+      let settlementReceived = 0;
+      let directPixPaid = 0;
+      let directPixReceived = 0;
+
+      pixTransactions.forEach((t) => {
+        const isCompleted = t.status === 'COMPLETED';
+        const isPendingConfirmation = t.status === 'PENDING_CONFIRMATION';
+
+        if (!isCompleted && !isPendingConfirmation) return;
+        const val = Math.abs(t.valueBRL ?? 6.50);
+        if (val === 0) return;
+
+        if (t.type === 'SETTLEMENT') {
+          // Settlement from passenger to driver
+          const isCurrentUserDriver = t.driverId === currentUser.id;
+          const isCurrentUserPassenger = t.passengerId === currentUser.id || (!t.driverId && t.userId === currentUser.id);
+
+          if (isCurrentUserDriver) {
+            // Current user is driver -> only count when completed
+            if (isCompleted) {
+              settlementReceived += val;
+              pixReceivedFromUser += val;
+            }
+          } else if (isCurrentUserPassenger) {
+            // Current user is passenger -> count settlement as effective in balance
+            settlementPaid += val;
+            pixPaidToUser += val;
+          } else {
+            // Fallback checking counterpart / names
+            const isCounterpartDriver = t.counterpartName?.toLowerCase().includes('motorista');
+            if (t.userId === currentUser.id) {
+              if (isCounterpartDriver) {
+                settlementPaid += val;
+                pixPaidToUser += val;
+              } else {
+                if (isCompleted) {
+                  settlementReceived += val;
+                  pixReceivedFromUser += val;
+                }
+              }
+            } else if (t.userId === otherUser.id) {
+              if (isCounterpartDriver) {
+                if (isCompleted) {
+                  settlementReceived += val;
+                  pixReceivedFromUser += val;
+                }
+              } else {
+                settlementPaid += val;
+                pixPaidToUser += val;
+              }
+            }
+          }
+        } else if (t.type === 'PIX_TRANSFER') {
+          if (!isCompleted) return;
+          // Direct PIX transfer
+          if (t.userId === currentUser.id) {
+            if ((t.valueBRL ?? 0) < 0) {
+              directPixPaid += val;
+              pixPaidToUser += val;
+            } else {
+              directPixReceived += val;
+              pixReceivedFromUser += val;
+            }
+          } else if (t.userId === otherUser.id) {
+            if ((t.valueBRL ?? 0) < 0) {
+              directPixReceived += val;
+              pixReceivedFromUser += val;
+            } else {
+              directPixPaid += val;
+              pixPaidToUser += val;
+            }
+          }
+        }
+      });
 
       // 4. Netting / Compensação Recíproca
       // grossDifference: (+) Você gerou mais créditos como motorista do que consumiu como passageiro
       //                  (-) Você consumiu mais como passageiro do que gerou como motorista
       const grossDifference = totalCreditsAsDriver - totalDebitsAsPassenger;
-      const pixNetAdjustment = pixPaidToUser - pixReceivedFromUser;
-      const netDifference = Math.round((grossDifference + pixNetAdjustment) * 100) / 100;
+
+      // Calculate net difference taking settlements and PIX transfers into account
+      // A settlement liquidates debt; it should never invert a positive credit into a debt.
+      let netDifference: number;
+      if (grossDifference >= 0) {
+        // Other user owes current user. Settlements received from other user reduce this debt towards 0.
+        const remainingDebtAfterSettlement = Math.max(0, grossDifference - settlementReceived);
+        // Direct PIX transfers can further adjust the balance
+        netDifference = remainingDebtAfterSettlement + (directPixPaid - directPixReceived);
+      } else {
+        // Current user owes other user. Settlements paid to other user reduce this debt towards 0.
+        const remainingDebtAfterSettlement = Math.max(0, Math.abs(grossDifference) - settlementPaid);
+        netDifference = -remainingDebtAfterSettlement + (directPixPaid - directPixReceived);
+      }
+
+      netDifference = Math.round(netDifference * 100) / 100;
       const absDifference = Math.abs(netDifference);
 
       const status: 'to_receive' | 'to_pay' | 'settled' =
@@ -602,31 +721,65 @@ export const GamificationView: React.FC<GamificationViewProps> = ({
       };
     });
 
+  const isSearching = nettingSearch.trim().length > 0;
+
   // Filtered bilateral records (showing all users with interaction or explicitly searched/selected)
   const activeBilateralRecords = bilateralNettingList.filter((rec) => {
-    // Has at least one interaction or is explicitly selected in dropdown
+    // Has explicitly selected in dropdown
+    if (selectedInspectUserId && rec.user.id === selectedInspectUserId) {
+      return true;
+    }
+
+    // REGRA 2: EM CASO DE PESQUISA
+    // "Em caso de pesquisa exibir somente os usuários que estão em grupos em comum ou que constam em alguma viagem juntos tanto no passado quanto no futuro"
+    if (isSearching) {
+      const isEligible = isUserEligibleForColleagueSearch(
+        currentUser.id,
+        rec.user.id,
+        groups,
+        rides,
+        cleanLedger
+      );
+      if (!isEligible) return false;
+
+      const term = nettingSearch.toLowerCase().trim();
+      const matchName = rec.user.name.toLowerCase().includes(term);
+      const matchEmail = rec.user.email?.toLowerCase().includes(term) || false;
+      const matchInst = rec.user.institutionName?.toLowerCase().includes(term) || false;
+      const matchPix = rec.user.pixKey?.toLowerCase().includes(term) || false;
+
+      if (!matchName && !matchEmail && !matchInst && !matchPix) return false;
+
+      // Filter by status tab if user specifically clicked one while searching
+      if (nettingFilter === 'to_pay' && rec.status !== 'to_pay') return false;
+      if (nettingFilter === 'to_receive' && rec.status !== 'to_receive') return false;
+      if (nettingFilter === 'settled' && rec.status !== 'settled') return false;
+
+      return true;
+    }
+
+    // REGRA 1: NA EXIBIÇÃO DOS COLEGAS (SEM PESQUISA ATIVA)
+    // "Formulário de saldos: na exibição dos colegas ocultar quem estiver com valor zero."
+    // Ocultar quem estiver com valor zero (absDifference < 0.01 ou status === 'settled') exceto se houver pendência de validação
+    if (rec.absDifference < 0.01 || rec.status === 'settled') {
+      if (nettingFilter !== 'settled' && !rec.hasPendingSettlement) {
+        return false;
+      }
+    }
+
+    // Has at least one interaction
     const hasInteraction =
       rec.driverRides.length > 0 ||
       rec.passengerRides.length > 0 ||
       rec.pixTransactions.length > 0 ||
-      rec.hasPendingSettlement ||
-      rec.user.id === selectedInspectUserId;
+      rec.hasPendingSettlement;
 
-    if (!hasInteraction && !selectedInspectUserId) return false;
+    if (!hasInteraction) return false;
 
     // Filter by status tab
     if (nettingFilter === 'to_pay' && rec.status !== 'to_pay') return false;
     if (nettingFilter === 'to_receive' && rec.status !== 'to_receive') return false;
     if (nettingFilter === 'settled' && rec.status !== 'settled') return false;
-
-    // Filter by search term
-    if (nettingSearch.trim()) {
-      const term = nettingSearch.toLowerCase();
-      const matchName = rec.user.name.toLowerCase().includes(term);
-      const matchInst = rec.user.institutionName?.toLowerCase().includes(term) || false;
-      const matchPix = rec.user.pixKey?.toLowerCase().includes(term) || false;
-      if (!matchName && !matchInst && !matchPix) return false;
-    }
 
     return true;
   });
@@ -643,6 +796,10 @@ export const GamificationView: React.FC<GamificationViewProps> = ({
   const consolidatedNetBalance = totalDifferenceToReceive - totalDifferenceToPay;
 
   const mutualPairsCount = bilateralNettingList.filter((r) => r.hasMutualRides).length;
+
+  const countWithBalance = bilateralNettingList.filter(
+    (r) => r.absDifference >= 0.01 && (r.driverRides.length > 0 || r.passengerRides.length > 0 || r.pixTransactions.length > 0)
+  ).length;
 
   const countToPay = bilateralNettingList.filter(
     (r) => r.status === 'to_pay' && (r.driverRides.length > 0 || r.passengerRides.length > 0)
@@ -958,11 +1115,6 @@ export const GamificationView: React.FC<GamificationViewProps> = ({
                     </span>
                   </div>
                   <div className="flex items-center gap-2 mt-1">
-                    <span className={`px-2 py-0.5 rounded text-[11px] font-bold ${
-                      user.saldo_caronas >= 0 ? 'bg-emerald-500/20 text-emerald-300' : 'bg-rose-500/20 text-rose-300'
-                    }`}>
-                      {user.saldo_caronas > 0 ? `+${user.saldo_caronas}` : user.saldo_caronas} Viagens Equivalentes
-                    </span>
                     <span className="text-[11px] text-slate-400 font-medium">
                       ({user.totalRidesOffered} ofertadas / {user.totalRidesTaken} pegas)
                     </span>
@@ -1380,9 +1532,9 @@ export const GamificationView: React.FC<GamificationViewProps> = ({
                       : 'text-slate-600 hover:text-slate-900'
                   }`}
                 >
-                  <span>Todos os Colegas</span>
-                  <span className="px-1.5 py-0.2 rounded-md bg-slate-200 text-slate-700 text-[10px] font-mono">
-                    {bilateralNettingList.filter((r) => r.driverRides.length > 0 || r.passengerRides.length > 0 || r.pixTransactions.length > 0).length}
+                  <span>Com Saldo</span>
+                  <span className="px-1.5 py-0.2 rounded-md bg-slate-200 text-slate-700 text-[10px] font-mono font-bold">
+                    {countWithBalance}
                   </span>
                 </button>
 
@@ -1443,14 +1595,14 @@ export const GamificationView: React.FC<GamificationViewProps> = ({
                     type="text"
                     value={nettingSearch}
                     onChange={(e) => setNettingSearch(e.target.value)}
-                    placeholder="Buscar colega ou chave PIX..."
+                    placeholder="Buscar colega em comum ou PIX..."
                     className="w-full sm:w-56 pl-9 pr-3 py-1.5 bg-slate-50 border border-slate-300 rounded-xl text-xs text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-600"
                   />
                   {nettingSearch && (
                     <button
                       type="button"
                       onClick={() => setNettingSearch('')}
-                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 text-xs"
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 text-xs cursor-pointer"
                     >
                       <X className="w-3.5 h-3.5" />
                     </button>
@@ -1461,17 +1613,26 @@ export const GamificationView: React.FC<GamificationViewProps> = ({
                 <select
                   value={selectedInspectUserId}
                   onChange={(e) => setSelectedInspectUserId(e.target.value)}
-                  className="px-3 py-1.5 bg-slate-50 border border-slate-300 rounded-xl text-xs text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-600 font-medium"
+                  className="px-3 py-1.5 bg-slate-50 border border-slate-300 rounded-xl text-xs text-slate-700 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-600 font-medium cursor-pointer"
                 >
                   <option value="">Consultar outro colega...</option>
                   {allUsers
-                    .filter((u) => u.id !== currentUser.id)
+                    .filter((u) => u.id !== currentUser.id && isUserEligibleForColleagueSearch(currentUser.id, u.id, groups, rides, cleanLedger))
                     .map((u) => (
                       <option key={u.id} value={u.id}>
                         {u.name} ({u.institutionName || 'Colega'})
                       </option>
                     ))}
                 </select>
+                {selectedInspectUserId && (
+                  <button
+                    type="button"
+                    onClick={() => setSelectedInspectUserId('')}
+                    className="text-xs text-slate-500 hover:text-slate-700 underline font-medium cursor-pointer"
+                  >
+                    Limpar
+                  </button>
+                )}
               </div>
             </div>
           </div>
@@ -1485,19 +1646,25 @@ export const GamificationView: React.FC<GamificationViewProps> = ({
                 </div>
                 <div className="space-y-1">
                   <h4 className="font-display font-bold text-slate-900 text-base">
-                    Nenhum lançamento encontrado
+                    {isSearching ? 'Nenhum colega encontrado' : 'Nenhum saldo pendente de acerto'}
                   </h4>
                   <p className="text-xs text-slate-500 leading-relaxed max-w-sm mx-auto">
-                    Não há valores pendentes de acerto com os filtros selecionados. Ao realizar viagens, o saldo a pagar ou receber aparecerá discriminado aqui.
+                    {isSearching
+                      ? 'A pesquisa exibe somente os usuários que estão em grupos em comum ou que constam em alguma viagem juntos tanto no passado quanto no futuro.'
+                      : 'Colegas com valor zero (contas quitadas) ficam ocultos na exibição. Use o campo de busca acima para consultar qualquer colega de grupo ou viagem.'}
                   </p>
                 </div>
-                {nettingFilter !== 'all' && (
+                {(nettingFilter !== 'all' || isSearching) && (
                   <button
                     type="button"
-                    onClick={() => setNettingFilter('all')}
+                    onClick={() => {
+                      setNettingFilter('all');
+                      setNettingSearch('');
+                      setSelectedInspectUserId('');
+                    }}
                     className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-xl transition cursor-pointer"
                   >
-                    Exibir Todos os Colegas
+                    Ver Colegas com Saldo
                   </button>
                 )}
               </div>
@@ -1877,7 +2044,7 @@ export const GamificationView: React.FC<GamificationViewProps> = ({
                     required
                   >
                     {allUsers
-                      .filter((u) => u.id !== currentUser.id)
+                      .filter((u) => u.id !== currentUser.id && isUserEligibleForColleagueSearch(currentUser.id, u.id, groups, rides, cleanLedger))
                       .map((u) => (
                         <option key={u.id} value={u.id}>
                           {u.name} — Ag: {u.agency || '0001'} / C/C: {u.accountNumber || '48291-0'} ({u.institutionName})

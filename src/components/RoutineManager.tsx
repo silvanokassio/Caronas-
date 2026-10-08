@@ -489,6 +489,7 @@ export const RoutineManager: React.FC<RoutineManagerProps> = ({
             ? destLng
             : meetingPoint.lng
         }
+        currentUser={currentUser}
         onSelectLocation={(selected) => {
           if (mapPickerTarget === 'routineOrigin') {
             setOriginAddress(selected.address);

@@ -41,9 +41,12 @@ import {
   CheckSquare,
   Square,
   LogIn,
-  Trash2
+  Trash2,
+  ShieldAlert,
+  UserMinus,
+  LogOut
 } from 'lucide-react';
-import { Group, User, Community, Ride, isSuperUser } from '../types';
+import { Group, User, Community, Ride, isSuperUser, getGroupDestinationAlias, isUserMemberOfGroup, isUserGroupManager as checkIsUserGroupManager, isUserPendingJoinGroup, isUserInvitedToGroup } from '../types';
 import { LocationPickerModal } from './LocationPickerModal';
 import { searchAddressGeocode, GeocodedPlace } from '../lib/geo';
 import { GroupWeeklyScheduleGrid } from './GroupWeeklyScheduleGrid';
@@ -80,10 +83,12 @@ interface GroupsViewProps {
   onQuickCreateRide?: (dayDateStr: string, group: Group) => void;
   onQuickBookSeat?: (rideId: string) => void;
   onQuickCancelSeat?: (rideId: string, userId: string) => void;
-  onCancelRide?: (rideId: string) => void;
+  onCancelRide?: (rideId: string, reason?: string) => void;
   onNavigateToRideEdit?: (ride: Ride) => void;
   onAddMemberDirectly?: (groupId: string, targetUserId: string) => void;
-  onRemoveMember?: (groupId: string, userId: string) => void;
+  onRemoveMember?: (groupId: string, userId: string, userEmail?: string) => Promise<void> | void;
+  onToggleBlockMember?: (groupId: string, userId: string) => void;
+  onRemovePassenger?: (rideId: string, passengerUserId: string, justification: string) => Promise<void> | void;
   onOpenAuth?: (mode?: 'login' | 'register') => void;
 }
 
@@ -112,11 +117,36 @@ export const GroupsView: React.FC<GroupsViewProps> = ({
   onNavigateToRideEdit,
   onAddMemberDirectly,
   onRemoveMember,
+  onToggleBlockMember,
+  onRemovePassenger,
   onOpenAuth,
 }) => {
   const [filterTab, setFilterTab] = useState<'my_and_pending' | 'my_groups' | 'pending' | 'managed' | 'invitations' | 'all'>('my_and_pending');
   const [selectedCommunityFilter, setSelectedCommunityFilter] = useState<string>('all');
   const [searchGroupQuery, setSearchGroupQuery] = useState<string>('');
+  const [searchInputValue, setSearchInputValue] = useState<string>('');
+  const [activeSearchTerm, setActiveSearchTerm] = useState<string>('');
+
+  const handleExecuteSearch = (customTerm?: string) => {
+    const term = (customTerm !== undefined ? customTerm : searchInputValue).trim();
+    if (!term) {
+      handleClearSearch();
+      return;
+    }
+    setSearchInputValue(term);
+    setActiveSearchTerm(term);
+    setSearchGroupQuery(term);
+    // Automaticamente expande a busca para todas as categorias e comunidades
+    setFilterTab('all');
+    setSelectedCommunityFilter('all');
+  };
+
+  const handleClearSearch = () => {
+    setSearchInputValue('');
+    setActiveSearchTerm('');
+    setSearchGroupQuery('');
+  };
+
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [managingGroupId, setManagingGroupId] = useState<string | null>(null);
   const [selectedUserToInvite, setSelectedUserToInvite] = useState<string>('');
@@ -145,9 +175,23 @@ export const GroupsView: React.FC<GroupsViewProps> = ({
   const [editDestLng, setEditDestLng] = useState(-46.7314);
   const [editDefaultPrice, setEditDefaultPrice] = useState(6.50);
   const [editDefaultDepartureTime, setEditDefaultDepartureTime] = useState('07:30');
+  const [editDefaultReturnTime, setEditDefaultReturnTime] = useState('17:30');
   const [isEditGeocoding, setIsEditGeocoding] = useState(false);
   const [editGeocodingFeedback, setEditGeocodingFeedback] = useState<{ type: 'success' | 'warning' | 'error'; message: string } | null>(null);
   const [editSuggestedAddresses, setEditSuggestedAddresses] = useState<GeocodedPlace[]>([]);
+
+  // Modais de Confirmação In-App (substituindo confirm() nativo que é bloqueado em iframes/mobile)
+  const [memberToRemove, setMemberToRemove] = useState<{
+    group: Group;
+    user: { id: string; name: string; email?: string; avatar?: string };
+  } | null>(null);
+  const [isRemovingMember, setIsRemovingMember] = useState(false);
+
+  const [groupToDelete, setGroupToDelete] = useState<Group | null>(null);
+  const [isDeletingGroup, setIsDeletingGroup] = useState(false);
+
+  const [groupToLeave, setGroupToLeave] = useState<Group | null>(null);
+  const [isLeavingGroup, setIsLeavingGroup] = useState(false);
 
   // Map Picker & Georeferencing State
   const [isMapPickerOpen, setIsMapPickerOpen] = useState(false);
@@ -170,10 +214,11 @@ export const GroupsView: React.FC<GroupsViewProps> = ({
   const [destLng, setDestLng] = useState(-46.7314);
   const [defaultPrice, setDefaultPrice] = useState(6.50);
   const [defaultDepartureTime, setDefaultDepartureTime] = useState('07:30');
+  const [defaultReturnTime, setDefaultReturnTime] = useState('17:30');
 
-  // Pending invitations for the current user across all groups
+
   const userPendingInvitations = groups.filter((g) =>
-    currentUser ? (g.pendingInvitations || []).some((inv) => inv.userId === currentUser.id) : false
+    currentUser ? isUserInvitedToGroup(g, currentUser, allUsers) : false
   );
 
   // Toggle recurring day selection
@@ -295,11 +340,14 @@ export const GroupsView: React.FC<GroupsViewProps> = ({
       defaultDestination: {
         address: destAddress.trim(),
         name: destName.trim() || destAddress.trim(),
+        alias: destName.trim() || undefined,
         lat: Number(destLat.toFixed(6)),
         lng: Number(destLng.toFixed(6)),
       },
+      destinationAlias: destName.trim() || undefined,
       defaultPrice: Number(defaultPrice) || 6.50,
       defaultDepartureTime: defaultDepartureTime || '07:30',
+      defaultReturnTime: defaultReturnTime || '17:30',
       memberIds: [currentUser.id],
       memberCount: 1,
     });
@@ -312,6 +360,8 @@ export const GroupsView: React.FC<GroupsViewProps> = ({
     setRecurringDays(['Seg', 'Ter', 'Qua', 'Qui', 'Sex']);
     setDestName('');
     setDestAddress('');
+    setDefaultDepartureTime('07:30');
+    setDefaultReturnTime('17:30');
     setIsCreatingNewCommunity(false);
     setNewCommunityName('');
     setNewCommunityDesc('');
@@ -326,12 +376,13 @@ export const GroupsView: React.FC<GroupsViewProps> = ({
     setEditVisibility(group.visibility || 'public');
     setEditRecurringDays(group.recurringDays || ['Seg', 'Ter', 'Qua', 'Qui', 'Sex']);
     setEditDescription(group.description || '');
-    setEditDestName(group.defaultDestination?.name || '');
+    setEditDestName(group.destinationAlias || group.defaultDestination?.alias || (group.defaultDestination?.name !== group.defaultDestination?.address ? group.defaultDestination?.name : '') || '');
     setEditDestAddress(group.defaultDestination?.address || '');
     setEditDestLat(group.defaultDestination?.lat || -23.5574);
     setEditDestLng(group.defaultDestination?.lng || -46.7314);
     setEditDefaultPrice(group.defaultPrice ?? 6.50);
     setEditDefaultDepartureTime(group.defaultDepartureTime || '07:30');
+    setEditDefaultReturnTime(group.defaultReturnTime || '17:30');
     setEditGeocodingFeedback(null);
     setEditSuggestedAddresses([]);
   };
@@ -412,11 +463,14 @@ export const GroupsView: React.FC<GroupsViewProps> = ({
       defaultDestination: {
         address: editDestAddress.trim(),
         name: editDestName.trim() || editDestAddress.trim(),
+        alias: editDestName.trim() || undefined,
         lat: Number(editDestLat.toFixed(6)),
         lng: Number(editDestLng.toFixed(6)),
       },
+      destinationAlias: editDestName.trim() || undefined,
       defaultPrice: Number(editDefaultPrice) || 6.50,
       defaultDepartureTime: editDefaultDepartureTime || '07:30',
+      defaultReturnTime: editDefaultReturnTime || '17:30',
     };
 
     onUpdateGroup?.(editingGroup.id, updates);
@@ -435,18 +489,16 @@ export const GroupsView: React.FC<GroupsViewProps> = ({
   };
 
   const isUserGroupManager = (group: Group): boolean => {
-    if (!currentUser) return false;
-    if (isSuperUser(currentUser)) return true;
-    if (group.creatorId === currentUser.id) return true;
-    if (group.adminIds && group.adminIds.includes(currentUser.id)) return true;
-    return false;
+    return checkIsUserGroupManager(group, currentUser, allUsers);
   };
 
   // Filter groups according to tab, community, search query, and visibility governance
   const filteredGroups = useMemo(() => {
-    // Requisito: Não exibir grupos ativamente quando houver um acesso não logado
+    const effectiveSearch = (activeSearchTerm.trim() || searchGroupQuery.trim()).toLowerCase();
+
+    // Requisito: Não exibir grupos ativamente quando houver um acesso não logado sem pesquisa
     if (!currentUser) {
-      const hasActiveSearch = searchGroupQuery.trim().length > 0 || selectedCommunityFilter !== 'all';
+      const hasActiveSearch = effectiveSearch.length > 0 || selectedCommunityFilter !== 'all';
       if (!hasActiveSearch) {
         return []; // Acesso deslogado sem pesquisa ativa não exibe grupos
       }
@@ -456,60 +508,62 @@ export const GroupsView: React.FC<GroupsViewProps> = ({
       // 1. Governance Visibility Rule:
       // If group is private, ONLY show to members, creator, or superuser (hide from guests)
       if (g.visibility === 'private') {
-        const isMember = currentUser ? g.memberIds.includes(currentUser.id) : false;
-        const isCreator = currentUser ? g.creatorId === currentUser.id : false;
-        const isSuper = isSuperUser(currentUser);
-        if (!isMember && !isCreator && !isSuper) {
+        const isMember = isUserMemberOfGroup(g, currentUser, allUsers);
+        const isManager = isUserGroupManager(g);
+        if (!isMember && !isManager) {
           return false;
         }
       }
 
-      // 2. Filter by Community
-      if (selectedCommunityFilter !== 'all') {
+      // 2. Filter by Community (somente quando não há busca global ativa)
+      if (selectedCommunityFilter !== 'all' && !activeSearchTerm.trim()) {
         if (g.communityId !== selectedCommunityFilter) {
           return false;
         }
       }
 
-      // 3. Search query filter
-      if (searchGroupQuery.trim()) {
-        const q = searchGroupQuery.toLowerCase().trim();
-        const matchName = g.name.toLowerCase().includes(q);
-        const matchDesc = (g.description || '').toLowerCase().includes(q);
-        const matchDest = (g.defaultDestination?.address || '').toLowerCase().includes(q) || (g.defaultDestination?.name || '').toLowerCase().includes(q);
-        const matchComm = (g.communityName || '').toLowerCase().includes(q);
-        const matchCat = (g.category || '').toLowerCase().includes(q);
-        if (!matchName && !matchDesc && !matchDest && !matchComm && !matchCat) {
+      // 3. Search query filter (busca ampla em qualquer categoria, polo ou destino)
+      if (effectiveSearch) {
+        const matchName = g.name.toLowerCase().includes(effectiveSearch);
+        const matchDesc = (g.description || '').toLowerCase().includes(effectiveSearch);
+        const matchDest = (g.defaultDestination?.address || '').toLowerCase().includes(effectiveSearch) || 
+          (g.destinationAlias || '').toLowerCase().includes(effectiveSearch) ||
+          getGroupDestinationAlias(g).toLowerCase().includes(effectiveSearch) ||
+          (g.defaultDestination?.name || '').toLowerCase().includes(effectiveSearch);
+        const matchComm = (g.communityName || '').toLowerCase().includes(effectiveSearch);
+        const matchCat = (g.category || '').toLowerCase().includes(effectiveSearch);
+        const matchDays = (g.recurringDays || []).some((d) => d.toLowerCase().includes(effectiveSearch));
+        if (!matchName && !matchDesc && !matchDest && !matchComm && !matchCat && !matchDays) {
           return false;
         }
       }
 
-      // 4. Filter by Tab (for logged in users)
-      if (currentUser) {
+      // 4. Filter by Tab (para usuários logados)
+      // Quando há busca por palavra-chave ativa, busca em QUALQUER categoria de grupo, mesmo fora dos preferenciais!
+      if (currentUser && !activeSearchTerm.trim()) {
         if (filterTab === 'my_and_pending') {
-          const isMember = g.memberIds.includes(currentUser.id) || g.creatorId === currentUser.id;
-          const isPending = (g.pendingJoinRequests || []).some((req) => req.userId === currentUser.id);
-          const hasInvite = (g.pendingInvitations || []).some((inv) => inv.userId === currentUser.id);
-          const isSuper = isSuperUser(currentUser);
-          return isMember || isPending || hasInvite || isSuper;
+          const isMember = isUserMemberOfGroup(g, currentUser, allUsers);
+          const isPending = isUserPendingJoinGroup(g, currentUser, allUsers);
+          const hasInvite = isUserInvitedToGroup(g, currentUser, allUsers);
+          return isMember || isPending || hasInvite;
         }
         if (filterTab === 'managed') {
           return isUserGroupManager(g);
         }
         if (filterTab === 'my_groups') {
-          return g.memberIds.includes(currentUser.id) || g.creatorId === currentUser.id;
+          return isUserMemberOfGroup(g, currentUser, allUsers);
         }
         if (filterTab === 'pending') {
-          return (g.pendingJoinRequests || []).some((req) => req.userId === currentUser.id);
+          return isUserPendingJoinGroup(g, currentUser, allUsers);
         }
         if (filterTab === 'invitations') {
-          return (g.pendingInvitations || []).some((inv) => inv.userId === currentUser.id);
+          return isUserInvitedToGroup(g, currentUser, allUsers);
         }
       }
 
       return true;
     });
-  }, [groups, filterTab, selectedCommunityFilter, searchGroupQuery, currentUser]);
+  }, [groups, filterTab, selectedCommunityFilter, searchGroupQuery, activeSearchTerm, currentUser, allUsers]);
 
   return (
     <div className="space-y-8 pb-12">
@@ -625,23 +679,88 @@ export const GroupsView: React.FC<GroupsViewProps> = ({
           </div>
         )}
 
-        {/* Search Bar for Groups */}
-        <div className="relative">
-          <input
-            type="text"
-            value={searchGroupQuery}
-            onChange={(e) => setSearchGroupQuery(e.target.value)}
-            placeholder="Buscar grupos por universidade, empresa, bairro ou destino (ex: USP, Faria Lima, Mackenzie)..."
-            className="w-full bg-slate-50 border border-slate-300 rounded-2xl px-4 py-3.5 pl-11 text-slate-900 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-600 font-medium"
-          />
-          <Search className="w-5 h-5 text-slate-400 absolute left-3.5 top-3.5" />
-          {searchGroupQuery && (
+        {/* Search Bar for Groups with Dedicated 'Buscar' Button */}
+        <div className="space-y-3">
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              handleExecuteSearch();
+            }}
+            className="flex flex-col sm:flex-row items-stretch gap-2.5"
+          >
+            <div className="relative flex-1">
+              <input
+                type="text"
+                value={searchInputValue}
+                onChange={(e) => {
+                  setSearchInputValue(e.target.value);
+                  if (!e.target.value.trim() && activeSearchTerm) {
+                    setActiveSearchTerm('');
+                    setSearchGroupQuery('');
+                  }
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    handleExecuteSearch();
+                  }
+                }}
+                placeholder="Buscar grupos por universidade, empresa, bairro ou destino (ex: USP, Faria Lima, Mackenzie)..."
+                className="w-full bg-white border border-slate-300 rounded-2xl px-4 py-3.5 pl-11 pr-16 text-slate-900 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-600 font-medium shadow-2xs"
+              />
+              <Search className="w-5 h-5 text-slate-400 absolute left-3.5 top-3.5 pointer-events-none" />
+              {searchInputValue && (
+                <button
+                  type="button"
+                  onClick={handleClearSearch}
+                  className="absolute right-3.5 top-3 text-slate-400 hover:text-slate-600 text-xs px-2 py-1 bg-slate-100 hover:bg-slate-200 rounded-md cursor-pointer transition font-medium"
+                  title="Limpar pesquisa"
+                >
+                  Limpar
+                </button>
+              )}
+            </div>
+
             <button
-              onClick={() => setSearchGroupQuery('')}
-              className="absolute right-3.5 top-3 text-slate-400 hover:text-slate-600 text-xs px-2 py-1 bg-slate-200 rounded-md cursor-pointer"
+              type="submit"
+              id="btn-search-groups-submit"
+              className="px-6 py-3.5 bg-indigo-600 hover:bg-indigo-700 active:scale-95 text-white font-bold text-sm rounded-2xl shadow-xs transition flex items-center justify-center space-x-2 cursor-pointer shrink-0"
+              title="Buscar em qualquer categoria de grupo"
             >
-              Limpar
+              <Search className="w-4 h-4" />
+              <span>Buscar</span>
             </button>
+          </form>
+
+          {/* Feedback de Busca Global Ativa */}
+          {activeSearchTerm && (
+            <div className="bg-indigo-50 border border-indigo-200/80 rounded-2xl p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 shadow-2xs">
+              <div className="flex items-center space-x-3">
+                <div className="w-9 h-9 rounded-xl bg-indigo-600 text-white flex items-center justify-center shrink-0 shadow-2xs">
+                  <Search className="w-4 h-4" />
+                </div>
+                <div>
+                  <div className="flex items-center space-x-2">
+                    <span className="text-xs font-bold text-indigo-950">Busca Global em Todas as Categorias</span>
+                    <span className="px-2.5 py-0.5 rounded-full text-[11px] font-black bg-indigo-600 text-white shadow-2xs">
+                      {filteredGroups.length} {filteredGroups.length === 1 ? 'grupo encontrado' : 'grupos encontrados'}
+                    </span>
+                  </div>
+                  <p className="text-xs text-indigo-700 mt-0.5">
+                    Relação de grupos para o termo: <strong className="text-indigo-950 font-bold">"{activeSearchTerm}"</strong> (inclui acadêmicos, corporativos e comunitários).
+                  </p>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={handleClearSearch}
+                className="px-3.5 py-1.5 bg-white hover:bg-slate-100 text-slate-700 border border-slate-300 rounded-xl text-xs font-bold transition cursor-pointer flex items-center space-x-1.5 shadow-2xs shrink-0 self-end sm:self-auto"
+              >
+                <X className="w-3.5 h-3.5" />
+                <span>Limpar Busca</span>
+              </button>
+            </div>
           )}
         </div>
 
@@ -664,9 +783,8 @@ export const GroupsView: React.FC<GroupsViewProps> = ({
                   {
                     groups.filter(
                       (g) =>
-                        g.memberIds.includes(currentUser.id) ||
-                        g.creatorId === currentUser.id ||
-                        (g.pendingJoinRequests || []).some((req) => req.userId === currentUser.id)
+                        isUserMemberOfGroup(g, currentUser, allUsers) ||
+                        isUserPendingJoinGroup(g, currentUser, allUsers)
                     ).length
                   }
                   )
@@ -682,7 +800,13 @@ export const GroupsView: React.FC<GroupsViewProps> = ({
                 }`}
               >
                 <CheckCircle2 className="w-4 h-4" />
-                <span>Membro Aprovado ({groups.filter((g) => g.memberIds.includes(currentUser.id)).length})</span>
+                <span>
+                  Membro Aprovado (
+                  {
+                    groups.filter((g) => isUserMemberOfGroup(g, currentUser, allUsers)).length
+                  }
+                  )
+                </span>
               </button>
 
               <button
@@ -696,7 +820,7 @@ export const GroupsView: React.FC<GroupsViewProps> = ({
                 <Clock className="w-4 h-4" />
                 <span>
                   Aguardando Aprovação (
-                  {groups.filter((g) => (g.pendingJoinRequests || []).some((r) => r.userId === currentUser.id)).length}
+                  {groups.filter((g) => isUserPendingJoinGroup(g, currentUser, allUsers)).length}
                   )
                 </span>
               </button>
@@ -793,7 +917,7 @@ export const GroupsView: React.FC<GroupsViewProps> = ({
                   <button
                     key={hub}
                     type="button"
-                    onClick={() => setSearchGroupQuery(hub)}
+                    onClick={() => handleExecuteSearch(hub)}
                     className="px-3.5 py-1.5 rounded-xl bg-slate-100 hover:bg-indigo-50 hover:text-indigo-700 hover:border-indigo-200 border border-slate-200 text-slate-700 text-xs font-medium transition cursor-pointer active:scale-95"
                   >
                     🏢 {hub}
@@ -820,6 +944,29 @@ export const GroupsView: React.FC<GroupsViewProps> = ({
               </button>
             </div>
           </div>
+        ) : activeSearchTerm ? (
+          <div className="bg-white border border-slate-200 rounded-3xl p-10 sm:p-12 text-center space-y-4 shadow-xs">
+            <div className="w-14 h-14 rounded-2xl bg-amber-50 text-amber-600 flex items-center justify-center mx-auto ring-8 ring-amber-50/50">
+              <Search className="w-7 h-7" />
+            </div>
+            <div className="space-y-1.5 max-w-md mx-auto">
+              <h3 className="font-display font-bold text-slate-900 text-base sm:text-lg">
+                Nenhum grupo encontrado para "{activeSearchTerm}"
+              </h3>
+              <p className="text-xs text-slate-500 leading-relaxed">
+                Não encontramos nenhum grupo correspondente a essa palavra-chave em nenhuma categoria (acadêmica, corporativa ou comunitária). Tente buscar por termos mais genéricos.
+              </p>
+            </div>
+            <div className="pt-2 flex flex-wrap items-center justify-center gap-2">
+              <button
+                type="button"
+                onClick={handleClearSearch}
+                className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-xl transition cursor-pointer shadow-2xs"
+              >
+                Limpar Busca e Ver Todos os Grupos ({groups.length})
+              </button>
+            </div>
+          </div>
         ) : (
           <div className="bg-white border border-slate-200 rounded-3xl p-12 text-center space-y-3">
             <Users className="w-12 h-12 text-slate-300 mx-auto" />
@@ -831,9 +978,9 @@ export const GroupsView: React.FC<GroupsViewProps> = ({
                 ? 'Você ainda não criou nenhum grupo. Clique em "Criar Novo Grupo" para iniciar sua comunidade.'
                 : 'Tente buscar por termos mais amplos ou selecione outra comunidade.'}
             </p>
-            {searchGroupQuery && (
+            {(searchGroupQuery || activeSearchTerm) && (
               <button
-                onClick={() => setSearchGroupQuery('')}
+                onClick={handleClearSearch}
                 className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-xl transition cursor-pointer"
               >
                 Limpar Pesquisa
@@ -844,14 +991,18 @@ export const GroupsView: React.FC<GroupsViewProps> = ({
       ) : (
         <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-6">
           {filteredGroups.map((group) => {
-            const isMember = currentUser ? group.memberIds.includes(currentUser.id) : false;
+            const isMember = isUserMemberOfGroup(group, currentUser, allUsers);
             const isManager = isUserGroupManager(group);
-            const members = allUsers.filter((u) => group.memberIds.includes(u.id));
-            const hasRequestedJoin = currentUser
-              ? (group.pendingJoinRequests || []).some((r) => r.userId === currentUser.id)
-              : false;
+            const members = allUsers.filter((u) => {
+              const mIds = group.memberIds || [];
+              return mIds.includes(u.id) || (u.email && mIds.some((m) => m.toLowerCase() === u.email.toLowerCase()));
+            });
+            const hasRequestedJoin = isUserPendingJoinGroup(group, currentUser, allUsers);
             const userInvitation = currentUser
-              ? (group.pendingInvitations || []).find((i) => i.userId === currentUser.id)
+              ? (group.pendingInvitations || []).find((i) =>
+                  i.userId === currentUser.id ||
+                  (currentUser.email && i.userEmail && i.userEmail.toLowerCase() === currentUser.email.toLowerCase())
+                )
               : null;
             const isManagingThisGroup = managingGroupId === group.id;
             const pendingRequestsCount = (group.pendingJoinRequests || []).length;
@@ -969,12 +1120,30 @@ export const GroupsView: React.FC<GroupsViewProps> = ({
                         <div className="flex items-start space-x-2 min-w-0">
                           <MapPin className="w-4 h-4 text-rose-500 shrink-0 mt-0.5" />
                           <div className="min-w-0">
-                            <span className="font-bold text-slate-900 block truncate">
-                              {group.defaultDestination?.name || group.defaultDestination?.address || 'Destino Central'}
-                            </span>
-                            <span className="text-[11px] text-slate-500 block truncate">
-                              {group.defaultDestination?.address}
-                            </span>
+                            {(() => {
+                              const destAlias = getGroupDestinationAlias(group);
+                              const fullAddress = group.defaultDestination?.address;
+                              const explicitAlias = group.destinationAlias || group.defaultDestination?.alias || group.defaultDestination?.name;
+                              return (
+                                <>
+                                  <div className="flex items-center gap-1.5 flex-wrap">
+                                    <span className="font-bold text-slate-900 truncate">
+                                      {destAlias}
+                                    </span>
+                                    {explicitAlias && (
+                                      <span className="px-1.5 py-0.2 rounded bg-indigo-50 text-indigo-700 text-[10px] font-semibold border border-indigo-100">
+                                        Alias: {explicitAlias}
+                                      </span>
+                                    )}
+                                  </div>
+                                  {fullAddress && fullAddress !== destAlias && (
+                                    <span className="text-[11px] text-slate-500 block truncate" title={fullAddress}>
+                                      {fullAddress}
+                                    </span>
+                                  )}
+                                </>
+                              );
+                            })()}
                             {group.defaultDestination?.lat && group.defaultDestination?.lng && (
                               <div className="flex items-center space-x-1 mt-1">
                                 <span className="inline-flex items-center px-2 py-0.5 rounded-md text-[10px] font-mono font-medium bg-emerald-50 text-emerald-700 border border-emerald-200">
@@ -1002,20 +1171,28 @@ export const GroupsView: React.FC<GroupsViewProps> = ({
                         )}
                       </div>
 
-                      <div className="grid grid-cols-2 gap-2 pt-1 font-mono text-[11px]">
-                        <div className="bg-white border border-slate-200 rounded-xl px-2.5 py-1.5 flex items-center space-x-1.5">
+                      <div className="grid grid-cols-3 gap-2 pt-1 font-mono text-[11px]">
+                        <div className="bg-white border border-slate-200 rounded-xl px-2 py-1.5 flex items-center space-x-1.5">
                           <DollarSign className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-                          <div>
-                            <span className="text-[9px] text-slate-400 block font-sans uppercase font-bold">Valor Sugerido</span>
+                          <div className="min-w-0">
+                            <span className="text-[9px] text-slate-400 block font-sans uppercase font-bold truncate">Valor Sugerido</span>
                             <span className="font-bold text-slate-900">R$ {group.defaultPrice?.toFixed(2) || '6.50'}</span>
                           </div>
                         </div>
 
-                        <div className="bg-white border border-slate-200 rounded-xl px-2.5 py-1.5 flex items-center space-x-1.5">
+                        <div className="bg-white border border-slate-200 rounded-xl px-2 py-1.5 flex items-center space-x-1.5">
                           <Clock className="w-3.5 h-3.5 text-indigo-600 shrink-0" />
-                          <div>
-                            <span className="text-[9px] text-slate-400 block font-sans uppercase font-bold">Horário Típico</span>
+                          <div className="min-w-0">
+                            <span className="text-[9px] text-slate-400 block font-sans uppercase font-bold truncate">Hora Ida</span>
                             <span className="font-bold text-slate-900">{group.defaultDepartureTime || '07:30'}</span>
+                          </div>
+                        </div>
+
+                        <div className="bg-white border border-slate-200 rounded-xl px-2 py-1.5 flex items-center space-x-1.5">
+                          <Clock className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                          <div className="min-w-0">
+                            <span className="text-[9px] text-slate-400 block font-sans uppercase font-bold truncate">Hora Retorno</span>
+                            <span className="font-bold text-slate-900">{group.defaultReturnTime || '17:30'}</span>
                           </div>
                         </div>
                       </div>
@@ -1116,34 +1293,36 @@ export const GroupsView: React.FC<GroupsViewProps> = ({
                       </div>
 
                       {/* Adicionar Participante Diretamente (Recurso essencial para grupos privados) */}
-                      <div className="bg-white border border-indigo-100 rounded-xl p-3 space-y-2 shadow-2xs">
+                      <div className="bg-white border border-indigo-100 rounded-xl p-3.5 space-y-2.5 shadow-2xs">
                         <div className="flex items-center justify-between">
                           <span className="font-bold text-slate-900 text-xs flex items-center space-x-1.5">
                             <UserPlus className="w-3.5 h-3.5 text-indigo-600" />
                             <span>Adicionar Participante Diretamente</span>
                           </span>
-                          <span className="text-[10px] text-slate-500">Apenas Gestor</span>
+                          <span className="text-[10px] text-slate-500 font-medium">Apenas Gestor</span>
                         </div>
-                        <p className="text-[11px] text-slate-500">
+                        <p className="text-[11px] text-slate-500 leading-relaxed">
                           {group.visibility === 'private'
                             ? 'Em grupos privados, somente você pode incluir participantes diretamente.'
                             : 'Insira um usuário diretamente como membro oficial do grupo.'}
                         </p>
-                        <div className="flex gap-2">
-                          <select
-                            value={selectedUserToAddDirectly}
-                            onChange={(e) => setSelectedUserToAddDirectly(e.target.value)}
-                            className="flex-1 bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
-                          >
-                            <option value="">Selecione um usuário...</option>
-                            {allUsers
-                              .filter((u) => !group.memberIds.includes(u.id))
-                              .map((u) => (
-                                <option key={u.id} value={u.id}>
-                                  {u.name} ({u.email})
-                                </option>
-                              ))}
-                          </select>
+                        <div className="flex flex-col sm:flex-row gap-2 pt-1">
+                          <div className="relative flex-1 min-w-0">
+                            <select
+                              value={selectedUserToAddDirectly}
+                              onChange={(e) => setSelectedUserToAddDirectly(e.target.value)}
+                              className="w-full bg-slate-50 hover:bg-slate-100/70 border border-slate-200 rounded-xl px-3 py-2.5 text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 truncate transition cursor-pointer"
+                            >
+                              <option value="">Selecione um usuário...</option>
+                              {allUsers
+                                .filter((u) => !group.memberIds.includes(u.id))
+                                .map((u) => (
+                                  <option key={u.id} value={u.id}>
+                                    {u.name} ({u.email})
+                                  </option>
+                                ))}
+                            </select>
+                          </div>
                           <button
                             type="button"
                             disabled={!selectedUserToAddDirectly}
@@ -1153,9 +1332,9 @@ export const GroupsView: React.FC<GroupsViewProps> = ({
                                 setSelectedUserToAddDirectly('');
                               }
                             }}
-                            className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white font-bold rounded-xl text-xs flex items-center space-x-1 transition active:scale-95 cursor-pointer"
+                            className="w-full sm:w-auto shrink-0 px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold rounded-xl text-xs flex items-center justify-center space-x-1.5 transition active:scale-95 cursor-pointer shadow-2xs"
                           >
-                            <UserCheck className="w-3.5 h-3.5" />
+                            <UserCheck className="w-4 h-4" />
                             <span>Adicionar</span>
                           </button>
                         </div>
@@ -1216,37 +1395,155 @@ export const GroupsView: React.FC<GroupsViewProps> = ({
                         </div>
                       )}
 
-                      {/* Lista de Membros com Opção de Remover */}
-                      <div className="space-y-1.5">
-                        <span className="font-bold text-slate-800 text-[11px] uppercase tracking-wider block">
-                          Gerenciar Membros Atuais:
-                        </span>
-                        <div className="space-y-1.5 max-h-36 overflow-y-auto">
-                          {members.map((m) => {
-                            const isCreator = m.id === group.creatorId;
+                      {/* Gerenciamento de Membros do Grupo (Bloquear Adesão Automática & Excluir) */}
+                      <div className="space-y-2 pt-1 border-t border-indigo-100/80">
+                        <div className="flex items-center justify-between">
+                          <span className="font-bold text-slate-800 text-[11px] uppercase tracking-wider flex items-center gap-1.5">
+                            <Users className="w-3.5 h-3.5 text-indigo-600" />
+                            <span>Membros do Grupo ({group.memberIds?.length || 0}):</span>
+                          </span>
+                          <span className="text-[10px] text-slate-400 font-medium">Controle do Gestor</span>
+                        </div>
+
+                        {/* Banner Explicativo sobre Bloqueio vs Exclusão */}
+                        <div className="bg-indigo-50/70 border border-indigo-100 rounded-xl p-2.5 text-[11px] space-y-1">
+                          <div className="flex items-center gap-1.5 font-bold text-indigo-900">
+                            <Info className="w-3.5 h-3.5 text-indigo-600 shrink-0" />
+                            <span>Regras de Membros e Adesão Automática:</span>
+                          </div>
+                          <p className="text-slate-600 leading-snug">
+                            • <strong className="text-amber-800">1 - Bloquear Membro:</strong> o participante continua no grupo, mas <span className="underline">não tem adesão automática</span> nas viagens postadas pelo grupo (as reservas dele passarão por aprovação manual do motorista).
+                          </p>
+                          <p className="text-slate-600 leading-snug">
+                            • <strong className="text-rose-800">2 - Excluir do Grupo:</strong> remove definitivamente o usuário da lista de participantes deste grupo.
+                          </p>
+                        </div>
+
+                        {/* Lista de Membros */}
+                        <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
+                          {(group.memberIds || []).map((mId) => {
+                            const m = allUsers.find((u) => u.id === mId || (u.email && u.email.toLowerCase() === mId.toLowerCase())) || {
+                              id: mId,
+                              name: mId === group.creatorId ? (group.creatorName || 'Criador') : (mId.includes('@') ? mId.split('@')[0] : `Participante (${mId.slice(0, 6)})`),
+                              email: mId.includes('@') ? mId : '',
+                              avatar: 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=100',
+                            };
+                            const isCreator = m.id === group.creatorId || (group.creatorEmail && m.email && group.creatorEmail.toLowerCase() === m.email.toLowerCase());
+                            const isBlocked = (group.blockedMemberIds || []).some((b) => b === m.id || (m.email && b.toLowerCase() === m.email.toLowerCase()) || b.toLowerCase() === mId.toLowerCase());
+
                             return (
                               <div
                                 key={m.id}
-                                className="bg-white border border-indigo-100 rounded-xl p-2 flex items-center justify-between"
+                                className={`bg-white border rounded-xl p-2.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 transition shadow-2xs ${
+                                  isBlocked ? 'border-amber-300 bg-amber-50/30' : 'border-indigo-100 hover:border-indigo-200'
+                                }`}
                               >
-                                <div className="flex items-center space-x-2">
-                                  <img src={m.avatar} alt={m.name} className="w-6 h-6 rounded-full object-cover" />
-                                  <span className="text-xs font-semibold text-slate-800 truncate max-w-[130px]">
-                                    {m.name} {isCreator && '(Criador)'}
-                                  </span>
+                                <div className="flex items-center space-x-2.5 min-w-0">
+                                  <img
+                                    src={m.avatar || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=100'}
+                                    alt={m.name}
+                                    className="w-7 h-7 rounded-full object-cover shrink-0 border border-slate-200"
+                                  />
+                                  <div className="min-w-0">
+                                    <div className="flex items-center gap-1.5 flex-wrap">
+                                      <span className="text-xs font-bold text-slate-900 truncate">
+                                        {m.name}
+                                      </span>
+                                      {isCreator && (
+                                        <span className="px-1.5 py-0.5 rounded bg-amber-100 text-amber-900 border border-amber-200 text-[10px] font-bold">
+                                          Criador / Dono
+                                        </span>
+                                      )}
+                                      {isBlocked ? (
+                                        <span
+                                          className="px-2 py-0.5 rounded-md bg-amber-100 text-amber-900 border border-amber-200 text-[10px] font-bold flex items-center gap-1"
+                                          title="Bloqueado: continua no grupo, mas suas reservas em viagens exigirão aprovação manual do motorista."
+                                        >
+                                          <ShieldAlert className="w-3 h-3 text-amber-700 shrink-0" />
+                                          <span>Adesão Automática Bloqueada</span>
+                                        </span>
+                                      ) : (
+                                        <span
+                                          className="px-2 py-0.5 rounded-md bg-emerald-50 text-emerald-800 border border-emerald-200 text-[10px] font-bold flex items-center gap-1"
+                                          title="Ativo: confirmação instantânea de vaga nas viagens deste grupo."
+                                        >
+                                          <ShieldCheck className="w-3 h-3 text-emerald-600 shrink-0" />
+                                          <span>Adesão Automática Ativa</span>
+                                        </span>
+                                      )}
+                                    </div>
+                                    {m.email && (
+                                      <span className="text-[10px] text-slate-500 block truncate">
+                                        {m.email}
+                                      </span>
+                                    )}
+                                  </div>
                                 </div>
-                                {!isCreator && onRemoveMember && (
-                                  <button
-                                    onClick={() => {
-                                      if (confirm(`Remover ${m.name} do grupo?`)) {
-                                        onRemoveMember(group.id, m.id);
-                                      }
-                                    }}
-                                    className="text-[10px] text-rose-600 hover:underline p-1"
-                                  >
-                                    Remover
-                                  </button>
-                                )}
+
+                                {/* Ações de Gestão do Membro */}
+                                <div className="flex items-center gap-1.5 shrink-0 justify-end pt-1 sm:pt-0 border-t sm:border-t-0 border-slate-100">
+                                  {!isCreator ? (
+                                    <>
+                                      {/* Opção 1: Bloquear / Desbloquear adesão automática */}
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          if (onToggleBlockMember) {
+                                            onToggleBlockMember(group.id, m.id);
+                                          }
+                                        }}
+                                        className={`px-2.5 py-1.5 rounded-lg text-[11px] font-bold flex items-center gap-1.5 transition active:scale-95 cursor-pointer border ${
+                                          isBlocked
+                                            ? 'bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border-emerald-300'
+                                            : 'bg-amber-50 hover:bg-amber-100 text-amber-800 border-amber-300'
+                                        }`}
+                                        title={
+                                          isBlocked
+                                            ? 'Restabelecer adesão automática nas viagens postadas pelo grupo'
+                                            : 'Bloquear membro: ele continua no grupo mas não tem adesão automática nas viagens postadas pelo grupo'
+                                        }
+                                      >
+                                        {isBlocked ? (
+                                          <>
+                                            <ShieldCheck className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                                            <span>Desbloquear Adesão</span>
+                                          </>
+                                        ) : (
+                                          <>
+                                            <ShieldAlert className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                                            <span>Bloquear Membro</span>
+                                          </>
+                                        )}
+                                      </button>
+
+                                      {/* Opção 2: Excluir do grupo */}
+                                      <button
+                                        type="button"
+                                        id={`btn-remove-member-${m.id}`}
+                                        onClick={() => {
+                                          setMemberToRemove({
+                                            group,
+                                            user: {
+                                              id: m.id,
+                                              name: m.name,
+                                              email: m.email || (mId.includes('@') ? mId : undefined),
+                                              avatar: m.avatar,
+                                            },
+                                          });
+                                        }}
+                                        className="px-2.5 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-700 hover:text-rose-800 border border-rose-200 rounded-lg text-[11px] font-bold flex items-center gap-1.5 transition active:scale-95 cursor-pointer shadow-2xs"
+                                        title={`Excluir ${m.name} do grupo`}
+                                      >
+                                        <Trash2 className="w-3.5 h-3.5 text-rose-600 shrink-0" />
+                                        <span>Excluir do Grupo</span>
+                                      </button>
+                                    </>
+                                  ) : (
+                                    <span className="text-[10px] text-slate-400 italic px-1.5 py-1">
+                                      Gestor
+                                    </span>
+                                  )}
+                                </div>
                               </div>
                             );
                           })}
@@ -1257,11 +1554,7 @@ export const GroupsView: React.FC<GroupsViewProps> = ({
                         <div className="pt-2 border-t border-indigo-200/60 flex justify-end">
                           <button
                             type="button"
-                            onClick={() => {
-                              if (confirm(`Tem certeza de que deseja excluir o grupo "${group.name}"? Esta ação não pode ser desfeita.`)) {
-                                onDeleteGroup(group.id);
-                              }
-                            }}
+                            onClick={() => setGroupToDelete(group)}
                             className="px-3 py-1.5 text-[11px] font-bold text-rose-600 hover:text-rose-700 hover:bg-rose-50 rounded-lg flex items-center space-x-1.5 transition cursor-pointer"
                           >
                             <Trash2 className="w-3.5 h-3.5" />
@@ -1295,6 +1588,7 @@ export const GroupsView: React.FC<GroupsViewProps> = ({
                             onQuickCancelSeat(rideId, userId);
                           }
                         }}
+                        onRemovePassenger={onRemovePassenger}
                         onCancelRide={onCancelRide}
                         onNavigateToRideEdit={onNavigateToRideEdit}
                         onOpenAuth={onOpenAuth}
@@ -1375,11 +1669,7 @@ export const GroupsView: React.FC<GroupsViewProps> = ({
                   {/* Sair do Grupo se já for membro */}
                   {isMember && (
                     <button
-                      onClick={() => {
-                        if (confirm(`Tem certeza que deseja sair do grupo "${group.name}"?`)) {
-                          onLeaveGroup(group.id);
-                        }
-                      }}
+                      onClick={() => setGroupToLeave(group)}
                       className="w-full py-2 text-slate-400 hover:text-rose-600 text-[11px] font-semibold transition text-center cursor-pointer"
                     >
                       Sair do Grupo
@@ -1762,17 +2052,20 @@ export const GroupsView: React.FC<GroupsViewProps> = ({
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1 border-t border-indigo-100">
                   <div>
-                    <label className="block text-slate-800 font-bold mb-1">Nome do Ponto / Polo</label>
+                    <label className="block text-slate-800 font-bold mb-1 flex items-center justify-between">
+                      <span>Nome da Empresa / Faculdade (Apelido do Destino)</span>
+                      <span className="text-[10px] text-indigo-700 bg-indigo-50 px-1.5 py-0.5 rounded font-normal">Exibido nos Cards</span>
+                    </label>
                     <input
                       type="text"
                       value={destName}
                       onChange={(e) => setDestName(e.target.value)}
-                      placeholder="Ex: Campus Butantã ou Sede Nubank"
+                      placeholder="Ex: Elektro, USP Poli, Nubank Sede, FIAP..."
                       className="w-full bg-white border border-slate-300 rounded-xl px-3 py-2 text-xs text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
                     />
                   </div>
 
-                  <div className="grid grid-cols-2 gap-2">
+                  <div className="grid grid-cols-3 gap-2">
                     <div>
                       <label className="block text-slate-800 font-bold mb-1">Valor Sugerido (R$) *</label>
                       <input
@@ -1782,18 +2075,29 @@ export const GroupsView: React.FC<GroupsViewProps> = ({
                         required
                         value={defaultPrice}
                         onChange={(e) => setDefaultPrice(parseFloat(e.target.value) || 0)}
-                        className="w-full bg-white border border-slate-300 rounded-xl px-3 py-2 text-xs text-slate-900 font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
+                        className="w-full bg-white border border-slate-300 rounded-xl px-2.5 py-2 text-xs text-slate-900 font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
                       />
                     </div>
 
                     <div>
-                      <label className="block text-slate-800 font-bold mb-1">Horário Típico *</label>
+                      <label className="block text-slate-800 font-bold mb-1">Hora Ida *</label>
                       <input
                         type="time"
                         required
                         value={defaultDepartureTime}
                         onChange={(e) => setDefaultDepartureTime(e.target.value)}
-                        className="w-full bg-white border border-slate-300 rounded-xl px-3 py-2 text-xs text-slate-900 font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500/20 cursor-pointer"
+                        className="w-full bg-white border border-slate-300 rounded-xl px-2.5 py-2 text-xs text-slate-900 font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500/20 cursor-pointer"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-slate-800 font-bold mb-1">Hora Retorno *</label>
+                      <input
+                        type="time"
+                        required
+                        value={defaultReturnTime}
+                        onChange={(e) => setDefaultReturnTime(e.target.value)}
+                        className="w-full bg-white border border-slate-300 rounded-xl px-2.5 py-2 text-xs text-slate-900 font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500/20 cursor-pointer"
                       />
                     </div>
                   </div>
@@ -2160,17 +2464,20 @@ export const GroupsView: React.FC<GroupsViewProps> = ({
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1 border-t border-indigo-100">
                   <div>
-                    <label className="block text-slate-800 font-bold mb-1">Nome do Ponto / Polo</label>
+                    <label className="block text-slate-800 font-bold mb-1 flex items-center justify-between">
+                      <span>Nome da Empresa / Faculdade (Apelido do Destino)</span>
+                      <span className="text-[10px] text-indigo-700 bg-indigo-50 px-1.5 py-0.5 rounded font-normal">Exibido nos Cards</span>
+                    </label>
                     <input
                       type="text"
                       value={editDestName}
                       onChange={(e) => setEditDestName(e.target.value)}
-                      placeholder="Ex: Sede Nubank ou Campus Poli"
+                      placeholder="Ex: Elektro, USP Poli, Nubank Sede, FIAP..."
                       className="w-full bg-white border border-slate-300 rounded-xl px-3 py-2 text-xs text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
                     />
                   </div>
 
-                  <div className="grid grid-cols-2 gap-2">
+                  <div className="grid grid-cols-3 gap-2">
                     <div>
                       <label className="block text-slate-800 font-bold mb-1">Valor Sugerido (R$) *</label>
                       <input
@@ -2180,18 +2487,29 @@ export const GroupsView: React.FC<GroupsViewProps> = ({
                         required
                         value={editDefaultPrice}
                         onChange={(e) => setEditDefaultPrice(parseFloat(e.target.value) || 0)}
-                        className="w-full bg-white border border-slate-300 rounded-xl px-3 py-2 text-xs text-slate-900 font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
+                        className="w-full bg-white border border-slate-300 rounded-xl px-2.5 py-2 text-xs text-slate-900 font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
                       />
                     </div>
 
                     <div>
-                      <label className="block text-slate-800 font-bold mb-1">Horário Típico *</label>
+                      <label className="block text-slate-800 font-bold mb-1">Hora Ida *</label>
                       <input
                         type="time"
                         required
                         value={editDefaultDepartureTime}
                         onChange={(e) => setEditDefaultDepartureTime(e.target.value)}
-                        className="w-full bg-white border border-slate-300 rounded-xl px-3 py-2 text-xs text-slate-900 font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500/20 cursor-pointer"
+                        className="w-full bg-white border border-slate-300 rounded-xl px-2.5 py-2 text-xs text-slate-900 font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500/20 cursor-pointer"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-slate-800 font-bold mb-1">Hora Retorno *</label>
+                      <input
+                        type="time"
+                        required
+                        value={editDefaultReturnTime}
+                        onChange={(e) => setEditDefaultReturnTime(e.target.value)}
+                        className="w-full bg-white border border-slate-300 rounded-xl px-2.5 py-2 text-xs text-slate-900 font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500/20 cursor-pointer"
                       />
                     </div>
                   </div>
@@ -2214,10 +2532,9 @@ export const GroupsView: React.FC<GroupsViewProps> = ({
                   <button
                     type="button"
                     onClick={() => {
-                      if (confirm(`Tem certeza de que deseja excluir permanentemente o grupo "${editingGroup.name}"? Esta ação removerá o grupo e suas configurações.`)) {
-                        onDeleteGroup(editingGroup.id);
-                        setEditingGroup(null);
-                      }
+                      const grp = editingGroup;
+                      setEditingGroup(null);
+                      setGroupToDelete(grp);
                     }}
                     className="px-3.5 py-2.5 bg-rose-50 hover:bg-rose-100 text-rose-700 hover:text-rose-800 font-bold text-xs rounded-xl border border-rose-200 flex items-center space-x-1.5 transition active:scale-95 cursor-pointer"
                   >
@@ -2287,6 +2604,7 @@ export const GroupsView: React.FC<GroupsViewProps> = ({
             ? editDestAddress
             : destAddress
         }
+        currentUser={currentUser}
         onConfirmLocation={(lat, lng, address, name) => {
           if (mapPickerTarget === 'createGroupDest') {
             setDestLat(Number(lat.toFixed(6)));
@@ -2331,6 +2649,222 @@ export const GroupsView: React.FC<GroupsViewProps> = ({
           }
         }}
       />
+
+      {/* Modal de Confirmação de Exclusão de Membro do Grupo */}
+      {memberToRemove && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 animate-in fade-in duration-150">
+          <div className="bg-white border border-slate-200 rounded-3xl max-w-md w-full p-6 shadow-2xl space-y-4 animate-in zoom-in-95 duration-150">
+            <div className="flex items-center space-x-3">
+              <div className="w-11 h-11 rounded-2xl bg-rose-100 text-rose-600 flex items-center justify-center shrink-0">
+                <UserX className="w-6 h-6" />
+              </div>
+              <div className="min-w-0">
+                <h3 className="font-display font-bold text-base text-slate-900 truncate">
+                  Excluir Membro do Grupo
+                </h3>
+                <p className="text-xs text-slate-500 truncate">
+                  {memberToRemove.group.name}
+                </p>
+              </div>
+            </div>
+
+            <div className="bg-slate-50 border border-slate-200/80 rounded-2xl p-3.5 flex items-center space-x-3">
+              <img
+                src={memberToRemove.user.avatar || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?w=100'}
+                alt={memberToRemove.user.name}
+                className="w-10 h-10 rounded-full object-cover border border-slate-200 shrink-0"
+              />
+              <div className="min-w-0 flex-1">
+                <p className="text-xs font-bold text-slate-900 truncate">
+                  {memberToRemove.user.name}
+                </p>
+                {memberToRemove.user.email && (
+                  <p className="text-[11px] text-slate-500 truncate">
+                    {memberToRemove.user.email}
+                  </p>
+                )}
+              </div>
+            </div>
+
+            <p className="text-xs text-slate-600 leading-relaxed">
+              Deseja realmente remover <strong>{memberToRemove.user.name}</strong> deste grupo? O participante perderá o acesso às viagens exclusivas e suas reservas automáticas serão canceladas.
+            </p>
+
+            <div className="flex items-center justify-end space-x-2 pt-2 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => setMemberToRemove(null)}
+                disabled={isRemovingMember}
+                className="px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl transition cursor-pointer disabled:opacity-50"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                id="btn-confirm-remove-member"
+                onClick={async () => {
+                  if (memberToRemove && onRemoveMember) {
+                    try {
+                      setIsRemovingMember(true);
+                      await onRemoveMember(memberToRemove.group.id, memberToRemove.user.id, memberToRemove.user.email);
+                      setMemberToRemove(null);
+                    } catch (err) {
+                      console.error('Error removing member:', err);
+                    } finally {
+                      setIsRemovingMember(false);
+                    }
+                  }
+                }}
+                disabled={isRemovingMember}
+                className="px-4 py-2.5 bg-rose-600 hover:bg-rose-700 active:scale-95 text-white font-bold text-xs rounded-xl shadow-xs transition flex items-center space-x-1.5 cursor-pointer disabled:opacity-50"
+              >
+                {isRemovingMember ? (
+                  <>
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    <span>Excluindo...</span>
+                  </>
+                ) : (
+                  <>
+                    <Trash2 className="w-3.5 h-3.5" />
+                    <span>Confirmar Exclusão</span>
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal de Confirmação de Exclusão de Grupo */}
+      {groupToDelete && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 animate-in fade-in duration-150">
+          <div className="bg-white border border-slate-200 rounded-3xl max-w-md w-full p-6 shadow-2xl space-y-4 animate-in zoom-in-95 duration-150">
+            <div className="flex items-center space-x-3">
+              <div className="w-11 h-11 rounded-2xl bg-rose-100 text-rose-600 flex items-center justify-center shrink-0">
+                <Trash2 className="w-6 h-6" />
+              </div>
+              <div className="min-w-0">
+                <h3 className="font-display font-bold text-base text-slate-900 truncate">
+                  Excluir Grupo Permanentemente
+                </h3>
+                <p className="text-xs text-slate-500 truncate">
+                  {groupToDelete.name}
+                </p>
+              </div>
+            </div>
+
+            <p className="text-xs text-slate-600 leading-relaxed">
+              Tem certeza de que deseja excluir permanentemente o grupo <strong>"{groupToDelete.name}"</strong>? Esta ação removerá o grupo e suas configurações de governança.
+            </p>
+
+            <div className="flex items-center justify-end space-x-2 pt-2 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => setGroupToDelete(null)}
+                disabled={isDeletingGroup}
+                className="px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl transition cursor-pointer disabled:opacity-50"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                id="btn-confirm-delete-group"
+                onClick={async () => {
+                  if (groupToDelete && onDeleteGroup) {
+                    try {
+                      setIsDeletingGroup(true);
+                      await onDeleteGroup(groupToDelete.id);
+                      setGroupToDelete(null);
+                    } catch (err) {
+                      console.error('Error deleting group:', err);
+                    } finally {
+                      setIsDeletingGroup(false);
+                    }
+                  }
+                }}
+                disabled={isDeletingGroup}
+                className="px-4 py-2.5 bg-rose-600 hover:bg-rose-700 active:scale-95 text-white font-bold text-xs rounded-xl shadow-xs transition flex items-center space-x-1.5 cursor-pointer disabled:opacity-50"
+              >
+                {isDeletingGroup ? (
+                  <>
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    <span>Excluindo...</span>
+                  </>
+                ) : (
+                  <>
+                    <Trash2 className="w-3.5 h-3.5" />
+                    <span>Excluir Grupo</span>
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal de Confirmação de Saída de Grupo */}
+      {groupToLeave && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 animate-in fade-in duration-150">
+          <div className="bg-white border border-slate-200 rounded-3xl max-w-md w-full p-6 shadow-2xl space-y-4 animate-in zoom-in-95 duration-150">
+            <div className="flex items-center space-x-3">
+              <div className="w-11 h-11 rounded-2xl bg-amber-100 text-amber-700 flex items-center justify-center shrink-0">
+                <LogOut className="w-6 h-6" />
+              </div>
+              <div className="min-w-0">
+                <h3 className="font-display font-bold text-base text-slate-900 truncate">
+                  Sair do Grupo
+                </h3>
+                <p className="text-xs text-slate-500 truncate">
+                  {groupToLeave.name}
+                </p>
+              </div>
+            </div>
+
+            <p className="text-xs text-slate-600 leading-relaxed">
+              Tem certeza de que deseja sair do grupo <strong>"{groupToLeave.name}"</strong>? Você deixará de receber viagens automáticas deste grupo.
+            </p>
+
+            <div className="flex items-center justify-end space-x-2 pt-2 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => setGroupToLeave(null)}
+                disabled={isLeavingGroup}
+                className="px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl transition cursor-pointer disabled:opacity-50"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                id="btn-confirm-leave-group"
+                onClick={async () => {
+                  if (groupToLeave && onLeaveGroup) {
+                    try {
+                      setIsLeavingGroup(true);
+                      await onLeaveGroup(groupToLeave.id);
+                      setGroupToLeave(null);
+                    } catch (err) {
+                      console.error('Error leaving group:', err);
+                    } finally {
+                      setIsLeavingGroup(false);
+                    }
+                  }
+                }}
+                disabled={isLeavingGroup}
+                className="px-4 py-2.5 bg-rose-600 hover:bg-rose-700 active:scale-95 text-white font-bold text-xs rounded-xl shadow-xs transition flex items-center space-x-1.5 cursor-pointer disabled:opacity-50"
+              >
+                {isLeavingGroup ? (
+                  <>
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    <span>Saindo...</span>
+                  </>
+                ) : (
+                  <span>Confirmar Saída</span>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
